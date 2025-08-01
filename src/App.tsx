@@ -22,7 +22,7 @@ const App: React.FC = () => {
   const [maskingGroups, setMaskingGroups] = useState<MaskingGroup[]>(MASKING_GROUPS);
   const [selectedGroup, setSelectedGroup] = useState<string>('armor');
   const [selectedColor, setSelectedColor] = useState<string>('#FF0000');
-  const [backgroundColor, setBackgroundColor] = useState<number>(0x808080);
+  const [backgroundColor, setBackgroundColor] = useState<number>(0xffffff);
 
   const handleFileUpload = useCallback(async (file: File) => {
     setIsLoading(true);
@@ -91,7 +91,7 @@ const App: React.FC = () => {
             Upload your STL files and paint your 3D miniatures in real-time
           </p>
           <div style={{ marginTop: '20px', fontSize: '14px', color: '#6B7280' }}>
-            WS: Toward/Away from camera • AD: Left/Right • EQ: Up/Down • Arrow Keys: Rotate model • Mouse: Orbit camera • Scroll: Zoom
+            Mouse: Orbit camera around model • Scroll: Zoom in/out
           </div>
         </div>
 

@@ -1,6 +1,6 @@
-import React, { useRef, useEffect, useCallback } from 'react';
+import React, { useRef, useEffect } from 'react';
 import * as THREE from 'three';
-import { PaintColors, MaskingGroup, ModelData } from '../types';
+import { PaintColors, MaskingGroup, ModelData } from '../types/index';
 
 interface ThreeSceneProps {
   paintColors: PaintColors;
@@ -21,59 +21,8 @@ const ThreeScene: React.FC<ThreeSceneProps> = ({
   const cameraRef = useRef<THREE.PerspectiveCamera | null>(null);
   const meshRef = useRef<THREE.Mesh | null>(null);
   const animationIdRef = useRef<number | null>(null);
-  const keysPressed = useRef<Set<string>>(new Set());
-  const moveSpeed = 0.24;
+  const orbitCenterRef = useRef<THREE.Vector3>(new THREE.Vector3(0, 0, 0));
 
-  const processMovement = useCallback(() => {
-    if (!meshRef.current || !cameraRef.current || keysPressed.current.size === 0) return;
-    
-    const camera = cameraRef.current;
-    const cameraToTarget = new THREE.Vector3(0, 6, 0).sub(camera.position).normalize();
-    const worldUp = new THREE.Vector3(0, 1, 0);
-    const cameraRight = new THREE.Vector3().crossVectors(cameraToTarget, worldUp).normalize();
-    const cameraUp = new THREE.Vector3().crossVectors(cameraRight, cameraToTarget).normalize();
-    
-    keysPressed.current.forEach(key => {
-      switch (key) {
-        case 'w':
-          meshRef.current!.position.add(cameraToTarget.clone().multiplyScalar(-moveSpeed));
-          break;
-        case 's':
-          meshRef.current!.position.add(cameraToTarget.clone().multiplyScalar(moveSpeed));
-          break;
-        case 'a':
-          meshRef.current!.position.add(cameraRight.clone().multiplyScalar(moveSpeed));
-          break;
-        case 'd':
-          meshRef.current!.position.add(cameraRight.clone().multiplyScalar(-moveSpeed));
-          break;
-        case 'e':
-          meshRef.current!.position.add(cameraUp.clone().multiplyScalar(-moveSpeed));
-          break;
-        case 'q':
-          meshRef.current!.position.add(cameraUp.clone().multiplyScalar(moveSpeed));
-          break;
-        case 'arrowleft': meshRef.current!.rotation.y += 0.05; break;
-        case 'arrowright': meshRef.current!.rotation.y -= 0.05; break;
-        case 'arrowup': meshRef.current!.rotation.x += 0.05; break;
-        case 'arrowdown': meshRef.current!.rotation.x -= 0.05; break;
-      }
-    });
-  }, []);
-
-  const handleKeyDown = useCallback((event: KeyboardEvent) => {
-    const key = event.key.toLowerCase();
-    if (['w', 'a', 's', 'd', 'q', 'e', 'arrowleft', 'arrowright', 'arrowup', 'arrowdown'].includes(key)) {
-      keysPressed.current.add(key);
-      event.preventDefault();
-    }
-  }, []);
-
-  const handleKeyUp = useCallback((event: KeyboardEvent) => {
-    keysPressed.current.delete(event.key.toLowerCase());
-  }, []);
-
-  // Scene initialization
   useEffect(() => {
     if (!mountRef.current) return;
 
@@ -82,8 +31,8 @@ const ThreeScene: React.FC<ThreeSceneProps> = ({
     sceneRef.current = scene;
 
     const camera = new THREE.PerspectiveCamera(75, mountRef.current.clientWidth / mountRef.current.clientHeight, 0.1, 2000);
-    camera.position.set(0, 5, 10);
-    camera.lookAt(0, 6, 0);
+    camera.position.set(0, 10, 10); // Raised camera from Y=5 to Y=10
+    camera.lookAt(orbitCenterRef.current);
     cameraRef.current = camera;
 
     const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: false });
@@ -91,6 +40,7 @@ const ThreeScene: React.FC<ThreeSceneProps> = ({
     renderer.shadowMap.enabled = false;
     renderer.setClearColor(backgroundColor, 1);
     
+    // Fix canvas styling to prevent duplication
     renderer.domElement.style.display = 'block';
     renderer.domElement.style.width = '100%';
     renderer.domElement.style.height = '100%';
@@ -134,25 +84,41 @@ const ThreeScene: React.FC<ThreeSceneProps> = ({
         y: event.clientY - previousMousePosition.y
       };
 
+      const orbitCenter = orbitCenterRef.current;
+      const cameraOffset = cameraRef.current.position.clone().sub(orbitCenter);
       const spherical = new THREE.Spherical();
-      spherical.setFromVector3(cameraRef.current.position);
+      spherical.setFromVector3(cameraOffset);
+      
       spherical.theta -= deltaMove.x * 0.01;
       spherical.phi -= deltaMove.y * 0.01;
       spherical.phi = Math.max(0.1, Math.min(Math.PI - 0.1, spherical.phi));
       
-      cameraRef.current.position.setFromSpherical(spherical);
-      cameraRef.current.lookAt(0, 6, 0);
+      cameraRef.current.position.setFromSpherical(spherical).add(orbitCenter);
+      cameraRef.current.lookAt(orbitCenter);
       previousMousePosition = { x: event.clientX, y: event.clientY };
     };
 
     const handleWheel = (event: WheelEvent) => {
       if (!cameraRef.current) return;
       event.preventDefault();
-      const currentDistance = cameraRef.current.position.length();
-      const zoomFactor = event.deltaY > 0 ? 1.1 : 0.9;
-      const clampedDistance = Math.max(3, Math.min(50, currentDistance * zoomFactor));
-      cameraRef.current.position.normalize().multiplyScalar(clampedDistance);
-      cameraRef.current.lookAt(0, 6, 0);
+      
+      const camera = cameraRef.current;
+      const orbitCenter = orbitCenterRef.current;
+      
+      // Get direction from orbit center to camera (zoom in/out direction)
+      const direction = camera.position.clone().sub(orbitCenter).normalize();
+      const moveAmount = event.deltaY * 0.05;
+      
+      // Move camera closer/further from orbit center
+      const newPosition = camera.position.clone().add(direction.multiplyScalar(moveAmount));
+      
+      // Prevent getting too close or too far
+      const distanceFromCenter = newPosition.distanceTo(orbitCenter);
+      if (distanceFromCenter > 2 && distanceFromCenter < 50) {
+        camera.position.copy(newPosition);
+      }
+      
+      camera.lookAt(orbitCenter);
     };
 
     const canvas = renderer.domElement;
@@ -163,12 +129,9 @@ const ThreeScene: React.FC<ThreeSceneProps> = ({
     
     window.addEventListener('mouseup', handleMouseUp, { passive: false });
     window.addEventListener('mousemove', handleMouseMove, { passive: false });
-    window.addEventListener('keydown', handleKeyDown);
-    window.addEventListener('keyup', handleKeyUp);
 
     const animate = () => {
       animationIdRef.current = requestAnimationFrame(animate);
-      processMovement();
       if (rendererRef.current && cameraRef.current && sceneRef.current) {
         rendererRef.current.render(sceneRef.current, cameraRef.current);
       }
@@ -184,11 +147,9 @@ const ThreeScene: React.FC<ThreeSceneProps> = ({
       canvas.removeEventListener('wheel', handleWheel);
       window.removeEventListener('mouseup', handleMouseUp);
       window.removeEventListener('mousemove', handleMouseMove);
-      window.removeEventListener('keydown', handleKeyDown);
-      window.removeEventListener('keyup', handleKeyUp);
 
-      if (meshRef.current) {
-        scene.remove(meshRef.current);
+      if (meshRef.current && sceneRef.current) {
+        sceneRef.current.remove(meshRef.current);
         if (meshRef.current.geometry) meshRef.current.geometry.dispose();
         if (meshRef.current.material) (meshRef.current.material as THREE.Material).dispose();
       }
@@ -199,7 +160,7 @@ const ThreeScene: React.FC<ThreeSceneProps> = ({
         }
       }
     };
-  }, [handleKeyDown, handleKeyUp, processMovement]);
+  }, [backgroundColor]);
 
   // Background color updates
   useEffect(() => {
@@ -246,6 +207,10 @@ const ThreeScene: React.FC<ThreeSceneProps> = ({
       
       mesh.position.copy(center).multiplyScalar(-scale);
       mesh.scale.setScalar(scale);
+      
+      // Set orbit center to be higher up on the model (less empty space below)
+      orbitCenterRef.current.copy(mesh.position);
+      orbitCenterRef.current.y += 6; // Look at a point 6 units above the model center
     }
     
     mesh.castShadow = false;
@@ -257,7 +222,7 @@ const ThreeScene: React.FC<ThreeSceneProps> = ({
       rendererRef.current.render(sceneRef.current, cameraRef.current);
     }
   }, [modelData]);
-  
+
   // Paint color updates
   useEffect(() => {
     if (meshRef.current && meshRef.current.material) {
