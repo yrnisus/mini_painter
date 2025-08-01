@@ -21,26 +21,28 @@ const ThreeScene: React.FC<ThreeSceneProps> = ({
   const cameraRef = useRef<THREE.PerspectiveCamera | null>(null);
   const meshRef = useRef<THREE.Mesh | null>(null);
   const animationIdRef = useRef<number | null>(null);
-  const orbitCenterRef = useRef<THREE.Vector3>(new THREE.Vector3(0, 0, 0));
+  
+  // Fixed orbit center that doesn't change (this prevents snapping)
+  const orbitCenterRef = useRef<THREE.Vector3>(new THREE.Vector3(0, 6, 0));
 
+  // Scene initialization
   useEffect(() => {
     if (!mountRef.current) return;
 
     const scene = new THREE.Scene();
-    scene.background = new THREE.Color(backgroundColor);
+    // Don't set background here - let the separate useEffect handle it
     sceneRef.current = scene;
 
     const camera = new THREE.PerspectiveCamera(75, mountRef.current.clientWidth / mountRef.current.clientHeight, 0.1, 2000);
-    camera.position.set(0, 10, 10); // Raised camera from Y=5 to Y=10
+    camera.position.set(0, 10, 10); // Raised camera position
     camera.lookAt(orbitCenterRef.current);
     cameraRef.current = camera;
 
     const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: false });
     renderer.setSize(mountRef.current.clientWidth, mountRef.current.clientHeight);
     renderer.shadowMap.enabled = false;
-    renderer.setClearColor(backgroundColor, 1);
+    // Don't set clear color here - let the separate useEffect handle it
     
-    // Fix canvas styling to prevent duplication
     renderer.domElement.style.display = 'block';
     renderer.domElement.style.width = '100%';
     renderer.domElement.style.height = '100%';
@@ -84,17 +86,25 @@ const ThreeScene: React.FC<ThreeSceneProps> = ({
         y: event.clientY - previousMousePosition.y
       };
 
+      // Use the FIXED orbit center (never changes)
       const orbitCenter = orbitCenterRef.current;
+      
+      // Calculate camera's position relative to orbit center
       const cameraOffset = cameraRef.current.position.clone().sub(orbitCenter);
+      
+      // Convert to spherical coordinates around orbit center
       const spherical = new THREE.Spherical();
       spherical.setFromVector3(cameraOffset);
       
+      // Apply rotation
       spherical.theta -= deltaMove.x * 0.01;
       spherical.phi -= deltaMove.y * 0.01;
       spherical.phi = Math.max(0.1, Math.min(Math.PI - 0.1, spherical.phi));
       
+      // Convert back to world position
       cameraRef.current.position.setFromSpherical(spherical).add(orbitCenter);
       cameraRef.current.lookAt(orbitCenter);
+      
       previousMousePosition = { x: event.clientX, y: event.clientY };
     };
 
@@ -160,9 +170,9 @@ const ThreeScene: React.FC<ThreeSceneProps> = ({
         }
       }
     };
-  }, [backgroundColor]);
+  }, []); // Remove backgroundColor dependency to prevent scene recreation
 
-  // Background color updates
+  // Background color updates  
   useEffect(() => {
     if (sceneRef.current && rendererRef.current) {
       sceneRef.current.background = new THREE.Color(backgroundColor);
@@ -222,7 +232,7 @@ const ThreeScene: React.FC<ThreeSceneProps> = ({
       rendererRef.current.render(sceneRef.current, cameraRef.current);
     }
   }, [modelData]);
-
+  
   // Paint color updates
   useEffect(() => {
     if (meshRef.current && meshRef.current.material) {
