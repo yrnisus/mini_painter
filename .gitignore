@@ -1,0 +1,27 @@
+cat > .gitignore << EOF
+# Dependencies
+node_modules/
+
+# Large model files
+*.pth
+*.ckpt
+*.safetensors
+
+# Python virtual environments
+sam_env/
+venv/
+env/
+__pycache__/
+*.pyc
+
+# Environment files
+.env
+
+# Build outputs
+/build
+/dist
+
+# OS generated files
+.DS_Store
+Thumbs.db
+EOF
