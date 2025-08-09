@@ -1,4 +1,4 @@
-import React, { useState, useCallback } from 'react';
+import React, { useState, useCallback, useEffect } from 'react';
 import { Upload, Brain, Zap } from 'lucide-react';
 import * as THREE from 'three';
 
@@ -26,9 +26,52 @@ const App: React.FC = () => {
   const [aiAnalysis, setAiAnalysis] = useState<any>(null);
   const [backendStatus, setBackendStatus] = useState<'unknown' | 'connected' | 'error'>('unknown');
 
+  // SAM Groups State
+  const [useSAMGroups, setUseSAMGroups] = useState<boolean>(false);
+  const [samMasks, setSamMasks] = useState<any[]>([]);
+  const [samGroupsData, setSamGroupsData] = useState<any>(null);
+  const [samMaskGroups, setSamMaskGroups] = useState<MaskingGroup[]>([]);
+  const [samSemanticGroups, setSamSemanticGroups] = useState<MaskingGroup[]>([]);
+  const [samGroupMode, setSamGroupMode] = useState<'individual' | 'semantic'>('individual');
+
   // Check backend connection on component mount
-  React.useEffect(() => {
+  useEffect(() => {
     checkBackendConnection();
+  }, []);
+
+  // Listen for SAM results
+  useEffect(() => {
+    (window as any).onSAMResults = (results: any) => {
+      console.log('🎭 SAM Results received:', results);
+      setSamMasks(results.masks);
+      setSamGroupsData(results);
+      
+      // Create individual SAM mask groups for UI
+      const samMaskGroups: MaskingGroup[] = results.masks.map((mask: any, index: number) => ({
+        id: `sam_mask_${mask.mask_id}`,
+        name: `Mask ${mask.mask_id} (${mask.area} px)`,
+        color: `hsl(${(mask.mask_id * 137.5) % 360}, 70%, 60%)`, // Generate colors
+        visible: true
+      }));
+      
+      // Also create semantic groups
+      const samSemanticGroups: MaskingGroup[] = [
+        { id: 'sam_main_body', name: 'SAM Main Body', color: '#8B4513', visible: true },
+        { id: 'sam_weapon', name: 'SAM Weapon', color: '#C0C0C0', visible: true },
+        { id: 'sam_shield', name: 'SAM Shield', color: '#800080', visible: true },
+        { id: 'sam_helmet', name: 'SAM Helmet', color: '#FFD700', visible: true },
+        { id: 'sam_details', name: 'SAM Details', color: '#FF4500', visible: true },
+        { id: 'sam_base', name: 'SAM Base', color: '#654321', visible: true }
+      ];
+      
+      // Store both options
+      setSamMaskGroups(samMaskGroups);
+      setSamSemanticGroups(samSemanticGroups);
+    };
+    
+    return () => {
+      delete (window as any).onSAMResults;
+    };
   }, []);
 
   const checkBackendConnection = async () => {
@@ -44,6 +87,12 @@ const App: React.FC = () => {
       setBackendStatus('error');
       console.log('❌ Backend not available, using fallback mode');
     }
+  };
+
+  // Function to get current groups based on mode
+  const getCurrentMaskingGroups = () => {
+    if (!useSAMGroups) return maskingGroups;
+    return samGroupMode === 'individual' ? samMaskGroups : samSemanticGroups;
   };
 
   const handleFileUpload = useCallback(async (file: File) => {
@@ -114,12 +163,32 @@ const App: React.FC = () => {
   }, []);
 
   const handleGroupToggle = useCallback((groupId: string) => {
-    setMaskingGroups(prev => 
-      prev.map(group => 
-        group.id === groupId ? { ...group, visible: !group.visible } : group
-      )
-    );
-  }, []);
+    const currentGroups = getCurrentMaskingGroups();
+    
+    if (useSAMGroups) {
+      // Update SAM groups
+      if (samGroupMode === 'individual') {
+        setSamMaskGroups(prev => 
+          prev.map(group => 
+            group.id === groupId ? { ...group, visible: !group.visible } : group
+          )
+        );
+      } else {
+        setSamSemanticGroups(prev => 
+          prev.map(group => 
+            group.id === groupId ? { ...group, visible: !group.visible } : group
+          )
+        );
+      }
+    } else {
+      // Update regular masking groups
+      setMaskingGroups(prev => 
+        prev.map(group => 
+          group.id === groupId ? { ...group, visible: !group.visible } : group
+        )
+      );
+    }
+  }, [useSAMGroups, samGroupMode]);
 
   const handleColorSelect = useCallback((color: string) => {
     setSelectedColor(color);
@@ -206,7 +275,7 @@ const App: React.FC = () => {
                 
                 <ThreeScene 
                   paintColors={paintColors} 
-                  maskingGroups={maskingGroups} 
+                  maskingGroups={getCurrentMaskingGroups()} 
                   modelData={modelData} 
                   backgroundColor={backgroundColor}
                   selectedGroup={selectedGroup}
@@ -216,12 +285,80 @@ const App: React.FC = () => {
             </div>
 
             <div>
+              {/* Enhanced Masking Panel with SAM Toggle */}
               <div style={{
                 background: 'white', borderRadius: '16px', padding: '24px',
                 boxShadow: '0 20px 25px -5px rgba(0, 0, 0, 0.1)', marginBottom: '20px'
               }}>
+                <div style={{ marginBottom: '16px' }}>
+                  <h3 style={{ fontSize: '18px', fontWeight: '700', color: '#1F2937', marginBottom: '12px' }}>
+                    Masking Groups
+                  </h3>
+                  
+                  {/* SAM Toggle */}
+                  {samMasks.length > 0 && (
+                    <div style={{ marginBottom: '16px', padding: '12px', backgroundColor: '#F3F4F6', borderRadius: '8px' }}>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: '12px', marginBottom: '8px' }}>
+                        <button
+                          onClick={() => setUseSAMGroups(!useSAMGroups)}
+                          style={{
+                            padding: '6px 12px',
+                            background: useSAMGroups ? '#10B981' : '#6B7280',
+                            color: 'white',
+                            borderRadius: '4px',
+                            border: 'none',
+                            cursor: 'pointer',
+                            fontSize: '12px',
+                            fontWeight: '600'
+                          }}
+                        >
+                          {useSAMGroups ? '🤖 SAM Groups' : '📐 Geometric Groups'}
+                        </button>
+                        
+                        <span style={{ fontSize: '12px', color: '#6B7280' }}>
+                          {useSAMGroups ? `${samMasks.length} AI-detected regions` : `${maskingGroups.length} geometric regions`}
+                        </span>
+                      </div>
+                      
+                      {/* SAM Group Mode Toggle */}
+                      {useSAMGroups && (
+                        <div style={{ display: 'flex', gap: '8px' }}>
+                          <button
+                            onClick={() => setSamGroupMode('individual')}
+                            style={{
+                              padding: '4px 8px',
+                              background: samGroupMode === 'individual' ? '#3B82F6' : '#E5E7EB',
+                              color: samGroupMode === 'individual' ? 'white' : '#6B7280',
+                              borderRadius: '4px',
+                              border: 'none',
+                              cursor: 'pointer',
+                              fontSize: '11px'
+                            }}
+                          >
+                            Individual ({samMaskGroups.length})
+                          </button>
+                          <button
+                            onClick={() => setSamGroupMode('semantic')}
+                            style={{
+                              padding: '4px 8px',
+                              background: samGroupMode === 'semantic' ? '#3B82F6' : '#E5E7EB',
+                              color: samGroupMode === 'semantic' ? 'white' : '#6B7280',
+                              borderRadius: '4px',
+                              border: 'none',
+                              cursor: 'pointer',
+                              fontSize: '11px'
+                            }}
+                          >
+                            Semantic (6)
+                          </button>
+                        </div>
+                      )}
+                    </div>
+                  )}
+                </div>
+                
                 <MaskingPanel
-                  groups={maskingGroups} 
+                  groups={getCurrentMaskingGroups()} 
                   onGroupToggle={handleGroupToggle}
                   selectedGroup={selectedGroup} 
                   onGroupSelect={setSelectedGroup}
@@ -246,7 +383,7 @@ const App: React.FC = () => {
                   colors={PAINT_COLORS} 
                   selectedColor={selectedColor}
                   onColorSelect={handleColorSelect}
-                  title={`Paint ${maskingGroups.find(g => g.id === selectedGroup)?.name || 'Selected Group'}`}
+                  title={`Paint ${getCurrentMaskingGroups().find(g => g.id === selectedGroup)?.name || 'Selected Group'}`}
                 />
               </div>
 
@@ -288,7 +425,29 @@ const App: React.FC = () => {
                         fontWeight: '600'
                       }}
                     >
-                      Test Single View SAM Capture
+                      🎯 Run SAM Segmentation (5 min)
+                    </button>
+                    
+                    <button
+                      onClick={() => {
+                        // Quick test - just show some colored regions without SAM
+                        console.log('🎨 Quick color test...');
+                        if ((window as any).testQuickColors) {
+                          (window as any).testQuickColors();
+                        }
+                      }}
+                      style={{
+                        padding: '8px 16px',
+                        background: 'linear-gradient(to right, #8B5CF6, #7C3AED)',
+                        color: 'white',
+                        borderRadius: '6px',
+                        border: 'none',
+                        cursor: 'pointer',
+                        fontSize: '12px',
+                        fontWeight: '500'
+                      }}
+                    >
+                      🎨 Quick Color Test
                     </button>
                     
                     <button
@@ -321,7 +480,7 @@ const App: React.FC = () => {
                     </button>
                   </div>
                   <p style={{ fontSize: '12px', color: '#6B7280', marginTop: '8px' }}>
-                    This will capture the current view and test SAM segmentation
+                    SAM takes ~5 minutes due to ViT-H model size. Try Quick Color Test first!
                   </p>
                 </div>
               )}
@@ -352,6 +511,24 @@ const App: React.FC = () => {
                     ) : (
                       <div><strong>Status:</strong> ⚠️ Using fallback mode</div>
                     )}
+                  </div>
+                </div>
+              )}
+
+              {/* SAM Results Info */}
+              {samMasks.length > 0 && (
+                <div style={{
+                  background: 'white', borderRadius: '16px', padding: '24px',
+                  boxShadow: '0 20px 25px -5px rgba(0, 0, 0, 0.1)', marginTop: '20px'
+                }}>
+                  <h3 style={{ fontSize: '18px', fontWeight: '700', color: '#1F2937', marginBottom: '16px' }}>
+                    🎭 SAM Analysis Results
+                  </h3>
+                  <div style={{ fontSize: '14px', color: '#4B5563', lineHeight: '1.6' }}>
+                    <div><strong>Status:</strong> ✅ SAM Segmentation Complete</div>
+                    <div><strong>Detected Regions:</strong> {samMasks.length}</div>
+                    <div><strong>Largest Region:</strong> {Math.max(...samMasks.map(m => m.area)).toLocaleString()} pixels</div>
+                    <div><strong>Average Confidence:</strong> {(samMasks.reduce((sum, m) => sum + m.stability_score, 0) / samMasks.length).toFixed(3)}</div>
                   </div>
                 </div>
               )}
