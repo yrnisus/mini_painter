@@ -3,3 +3,5 @@ export * from './samCaptureUtils';
 export * from './sceneSetupUtils';
 export * from './maskingUtils';
 export * from './modelLoaderUtils';
+export * from './samTo3DMapper';
+export * from './quickSAMMapper';

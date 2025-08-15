@@ -1,6 +1,7 @@
 import * as THREE from 'three';
 import { ModelData, MaskingGroup } from '../types';
 import { createGeometricMasking, applyVertexColors, VertexMasking, AIAnalysis } from './maskingUtils';
+import { SAMToVertexMapping } from './samTo3DMapper';
 
 export interface ModelLoadResult {
   mesh: THREE.Mesh;
@@ -13,7 +14,8 @@ export interface ModelLoadResult {
 export const loadAndProcessModel = (
   modelData: ModelData,
   maskingGroups: MaskingGroup[],
-  aiAnalysis?: AIAnalysis
+  aiAnalysis?: AIAnalysis,
+  samMapping?: SAMToVertexMapping | null
 ): ModelLoadResult => {
   // Clone and prepare geometry
   const geometry = modelData.geometry!.clone();
@@ -21,8 +23,15 @@ export const loadAndProcessModel = (
     geometry.computeVertexNormals();
   }
   
-  // Create vertex masking
-  const masking = createGeometricMasking(geometry, maskingGroups, aiAnalysis);
+  // Use SAM mapping if available, otherwise use geometric masking
+  let masking: VertexMasking;
+  if (samMapping) {
+    console.log('🎭 Using SAM-based vertex mapping');
+    masking = samMapping;
+  } else {
+    console.log('📐 Using geometric-based vertex mapping');
+    masking = createGeometricMasking(geometry, maskingGroups, aiAnalysis);
+  }
   
   // Apply initial vertex colors
   applyVertexColors(geometry, masking, maskingGroups, {});
@@ -84,7 +93,8 @@ export const updateMeshModel = (
   currentMesh: THREE.Mesh | null,
   modelData: ModelData,
   maskingGroups: MaskingGroup[],
-  aiAnalysis?: AIAnalysis
+  aiAnalysis?: AIAnalysis,
+  samMapping?: SAMToVertexMapping | null
 ): { newMesh: THREE.Mesh; masking: VertexMasking; orbitCenter: THREE.Vector3 } => {
   // Remove current mesh if it exists
   if (currentMesh) {
@@ -94,7 +104,7 @@ export const updateMeshModel = (
   }
 
   // Load and process new model
-  const { mesh, masking } = loadAndProcessModel(modelData, maskingGroups, aiAnalysis);
+  const { mesh, masking } = loadAndProcessModel(modelData, maskingGroups, aiAnalysis, samMapping);
   
   // Calculate orbit center
   const geometry = modelData.geometry!;
@@ -118,6 +128,24 @@ export const updateMeshColors = (
   const geometry = mesh.geometry as THREE.BufferGeometry;
   applyVertexColors(geometry, masking, maskingGroups, paintColors);
   geometry.attributes.color.needsUpdate = true;
+};
+
+/**
+ * Applies SAM-based masking to an existing mesh
+ */
+export const applySAMMasking = (
+  mesh: THREE.Mesh,
+  samMapping: SAMToVertexMapping,
+  maskingGroups: MaskingGroup[],
+  paintColors: { [key: string]: string } = {}
+): void => {
+  console.log('🎭 Applying SAM masking to existing mesh...');
+  
+  const geometry = mesh.geometry as THREE.BufferGeometry;
+  applyVertexColors(geometry, samMapping, maskingGroups, paintColors);
+  geometry.attributes.color.needsUpdate = true;
+  
+  console.log('✅ SAM masking applied to mesh');
 };
 
 /**

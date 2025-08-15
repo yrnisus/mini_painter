@@ -48,21 +48,7 @@ const ThreeScene: React.FC<ThreeSceneProps> = ({
     animationIdRef
   };
 
-  // Setup SAM test functions on window
-  useEffect(() => {
-    console.log('🔧 Setting up SAM test functions, modelData:', !!modelData);
-    
-    const cleanup = setupSAMTestFunctions(
-      sceneRef, 
-      cameraRef, 
-      rendererRef, 
-      meshRef
-    );
-    
-    return cleanup;
-  }, [modelData]);
-
-  // Scene initialization
+  // Scene initialization - UPDATED to ensure refs are properly set
   useEffect(() => {
     if (!mountRef.current) return;
 
@@ -74,8 +60,57 @@ const ThreeScene: React.FC<ThreeSceneProps> = ({
       orbitCenterRef.current
     );
 
+    // Verify refs are set after initialization
+    setTimeout(() => {
+      console.log('🔍 Scene refs check:', {
+        scene: !!sceneRef.current,
+        camera: !!cameraRef.current,
+        renderer: !!rendererRef.current,
+        mesh: !!meshRef.current
+      });
+    }, 100);
+
     return cleanup;
   }, []);
+
+  // Setup SAM test functions - MOVED after scene initialization
+  useEffect(() => {
+    // Wait for scene to be ready before setting up SAM functions
+    const setupSAMWhenReady = () => {
+      if (sceneRef.current && cameraRef.current && rendererRef.current) {
+        console.log('🔧 Setting up SAM test functions - scene is ready');
+        
+        const cleanup = setupSAMTestFunctions(
+          sceneRef, 
+          cameraRef, 
+          rendererRef, 
+          meshRef
+        );
+        
+        return cleanup;
+      } else {
+        console.log('⏳ Waiting for scene to be ready for SAM setup...');
+        return null;
+      }
+    };
+
+    // Try to setup immediately
+    let cleanup = setupSAMWhenReady();
+    
+    // If not ready, try again after a delay
+    if (!cleanup) {
+      const timer = setTimeout(() => {
+        cleanup = setupSAMWhenReady();
+      }, 200);
+      
+      return () => {
+        clearTimeout(timer);
+        if (cleanup) cleanup();
+      };
+    }
+    
+    return cleanup || (() => {});
+  }, [modelData]); // Re-setup when model changes
 
   // Background color updates  
   useEffect(() => {
@@ -109,6 +144,9 @@ const ThreeScene: React.FC<ThreeSceneProps> = ({
       orbitCenterRef.current = orbitCenter;
 
       console.log('✅ Model loaded successfully');
+      
+      // Verify mesh is properly set
+      console.log('🔍 Mesh ref updated:', !!meshRef.current);
 
       // Force a render
       if (rendererRef.current && cameraRef.current && sceneRef.current) {

@@ -119,17 +119,6 @@ export const sendToSAMBackend = async (viewData: ViewData): Promise<SAMResponse 
     console.log('Backend URL: http://localhost:5000/segment-single-view');
     console.log('View data keys:', Object.keys(viewData));
     
-    // First, test if the endpoint exists
-    console.log('🔍 Testing if endpoint exists...');
-    try {
-      const testResponse = await fetch('http://localhost:5000/segment-single-view', {
-        method: 'OPTIONS'
-      });
-      console.log('OPTIONS response:', testResponse.status);
-    } catch (optionsError) {
-      console.warn('OPTIONS test failed:', optionsError);
-    }
-    
     const payload = {
       color_image: viewData.colorPNG,
       depth_array: Array.from(viewData.depthArray),
@@ -158,19 +147,22 @@ export const sendToSAMBackend = async (viewData: ViewData): Promise<SAMResponse 
     console.log('📥 Response received:', {
       ok: response.ok,
       status: response.status,
-      statusText: response.statusText,
-      headers: Object.fromEntries(response.headers.entries())
+      statusText: response.statusText
     });
     
     if (response.ok) {
       const result: SAMResponse = await response.json();
       console.log('✅ SAM segmentation result:', result);
-      console.log(`🎭 Found ${result.num_masks} masks!`);
+      console.log(`🎭 Found ${result.num_masks} real masks!`);
       
-      // Log mask details
-      result.masks?.forEach((mask, i) => {
-        console.log(`Mask ${i}: ${mask.pixel_coords?.length || 0} pixels, area=${mask.area}, score=${mask.stability_score?.toFixed(3)}`);
-      });
+      // FIXED: Call the frontend callback with real results
+      if ((window as any).onSAMResults) {
+        console.log('🔄 Calling frontend onSAMResults with real data...');
+        (window as any).onSAMResults(result);
+        console.log('✅ Real SAM results sent to frontend UI');
+      } else {
+        console.error('❌ onSAMResults callback not found on window');
+      }
       
       return result;
     } else {
@@ -185,7 +177,6 @@ export const sendToSAMBackend = async (viewData: ViewData): Promise<SAMResponse 
   } catch (error) {
     console.error('❌ Network error sending to SAM backend:', error);
     
-    // Proper TypeScript error handling
     if (error instanceof Error) {
       console.error('Error details:', {
         name: error.name,
