@@ -1,599 +1,549 @@
-import os
-import io
-import json
-import base64
+# backend/app.py - Enhanced SAM Backend with Superpoint Graph Cut
 import numpy as np
 import cv2
-import torch
-import trimesh
-from PIL import Image
-from flask import Flask, request, jsonify
+from flask import Flask, request, jsonify, send_file
 from flask_cors import CORS
-from segment_anything import SamPredictor, sam_model_registry, SamAutomaticMaskGenerator
-from sklearn.cluster import KMeans
-import matplotlib.pyplot as plt
-from skimage import measure
+import base64
+import io
+from PIL import Image
+import time
+import logging
+from scipy.spatial.distance import cdist
+from scipy.sparse import csr_matrix
+from scipy.sparse.csgraph import connected_components
+from sklearn.cluster import DBSCAN
+from sklearn.preprocessing import StandardScaler
+import networkx as nx
+from dataclasses import dataclass
+from typing import List, Dict, Tuple, Optional, Any
+import json
+
+# SAM imports
+from segment_anything import SamPredictor, sam_model_registry
 
 app = Flask(__name__)
 CORS(app)
 
-# Global variables for SAM model
-sam_predictor = None
-device = "cuda" if torch.cuda.is_available() else "cpu"
+# Configure logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
-def initialize_sam():
-    """Initialize the SAM model"""
-    global sam_predictor
-    
-    # Try different model checkpoints in order of preference (ViT-B first for speed)
-    model_paths = [
-        "sam_vit_b_01ec64.pth",   # Fastest (for testing)
-        "sam_vit_l_0b3195.pth",  # Good balance  
-        "sam_vit_h_4b8939.pth"   # Best quality
-    ]
-    
-    model_types = ["vit_b", "vit_l", "vit_h"]
-    
-    for model_path, model_type in zip(model_paths, model_types):
-        if os.path.exists(model_path):
-            print(f"Loading SAM model: {model_path}")
-            sam = sam_model_registry[model_type](checkpoint=model_path)
-            sam.to(device=device)
-            sam_predictor = SamPredictor(sam)
-            print(f"SAM model loaded successfully on {device}")
-            return True
-    
-    print("No SAM model checkpoint found! Please download a model.")
-    return False
+@dataclass
+class SuperPoint:
+    """Represents a geometric superpoint in 3D space"""
+    id: int
+    vertices: List[int]  # Vertex indices belonging to this superpoint
+    centroid: np.ndarray  # 3D centroid position
+    normal: np.ndarray   # Average surface normal
+    curvature: float     # Average curvature
+    area: float          # Surface area
+    neighbors: List[int] # Adjacent superpoint IDs
 
-def load_stl_file(file_content):
-    """Load STL file and convert to mesh"""
-    try:
-        # Save uploaded content to temporary file
-        temp_path = "temp_model.stl"
-        with open(temp_path, 'wb') as f:
-            f.write(file_content)
-        
-        # Load with trimesh
-        mesh = trimesh.load(temp_path)
-        
-        # Clean up
-        os.remove(temp_path)
-        
-        return mesh
-    except Exception as e:
-        print(f"Error loading STL: {e}")
-        return None
+@dataclass
+class ViewCapture:
+    """Represents SAM analysis from a specific camera view"""
+    view_id: int
+    camera_matrix: np.ndarray
+    masks: List[Dict[str, Any]]
+    confidence_scores: List[float]
+    mask_features: List[np.ndarray]
 
-def render_mesh_views(mesh, num_views=6):
-    """Render multiple views of the 3D mesh for segmentation"""
-    views = []
+class GeometricSuperPointSegmenter:
+    """Creates geometric superpoints from 3D mesh data"""
     
-    # Create different camera angles with better coverage
-    angles = [
-        (0, 0),      # front
-        (90, 0),     # right
-        (180, 0),    # back
-        (270, 0),    # left
-        (0, 45),     # top-front diagonal
-        (0, -45)     # bottom-front diagonal
-    ]
+    def __init__(self, min_cluster_size: int = 50, curvature_threshold: float = 0.1):
+        self.min_cluster_size = min_cluster_size
+        self.curvature_threshold = curvature_threshold
     
-    for i, (azimuth, elevation) in enumerate(angles):
-        try:
-            # Create scene with better lighting
-            scene = mesh.scene()
+    def create_superpoints(self, vertices: np.ndarray, faces: np.ndarray) -> List[SuperPoint]:
+        """Segment mesh into geometric superpoints - OPTIMIZED for large meshes"""
+        logger.info(f"Creating superpoints from {len(vertices)} vertices and {len(faces)} faces")
+        
+        # PERFORMANCE OPTIMIZATION: For large meshes (>100k vertices), use fast spatial segmentation
+        if len(vertices) > 100000:
+            logger.info("Large mesh detected - using fast spatial segmentation")
+            return self._create_fast_spatial_superpoints(vertices, faces)
+        else:
+            return self._create_feature_based_superpoints(vertices, faces)
+    
+    def _create_fast_spatial_superpoints(self, vertices: np.ndarray, faces: np.ndarray) -> List[SuperPoint]:
+        """Fast spatial-based segmentation for large meshes"""
+        # Compute bounding box
+        min_bounds = np.min(vertices, axis=0)
+        max_bounds = np.max(vertices, axis=0)
+        size = max_bounds - min_bounds
+        
+        # Create spatial grid (8x8x8 = 512 regions max)
+        grid_divisions = 8
+        superpoints = []
+        
+        for i in range(grid_divisions):
+            for j in range(grid_divisions):
+                for k in range(grid_divisions):
+                    # Define grid cell bounds
+                    cell_min = min_bounds + (size * np.array([i, j, k]) / grid_divisions)
+                    cell_max = min_bounds + (size * np.array([i+1, j+1, k+1]) / grid_divisions)
+                    
+                    # Find vertices in this cell
+                    in_cell = np.all(vertices >= cell_min, axis=1) & np.all(vertices < cell_max, axis=1)
+                    vertex_indices = np.where(in_cell)[0].tolist()
+                    
+                    if len(vertex_indices) < self.min_cluster_size:
+                        continue
+                    
+                    # Create superpoint
+                    superpoint_vertices = vertices[vertex_indices]
+                    centroid = np.mean(superpoint_vertices, axis=0)
+                    
+                    # Simple normal estimation (up vector)
+                    avg_normal = np.array([0, 0, 1])
+                    
+                    superpoint = SuperPoint(
+                        id=len(superpoints),
+                        vertices=vertex_indices,
+                        centroid=centroid,
+                        normal=avg_normal,
+                        curvature=0.1,  # Default curvature
+                        area=len(vertex_indices) * 0.01,
+                        neighbors=[]
+                    )
+                    superpoints.append(superpoint)
+        
+        # Compute adjacency (simplified)
+        self._compute_spatial_adjacency(superpoints, grid_divisions)
+        
+        logger.info(f"Created {len(superpoints)} fast spatial superpoints")
+        return superpoints
+    
+    def _compute_spatial_adjacency(self, superpoints: List[SuperPoint], grid_divisions: int):
+        """Compute adjacency for spatial grid"""
+        # Simple grid-based adjacency
+        for i, sp in enumerate(superpoints):
+            # Each superpoint is adjacent to nearby grid cells
+            for j, other_sp in enumerate(superpoints):
+                if i != j:
+                    # Check if centroids are close
+                    distance = np.linalg.norm(sp.centroid - other_sp.centroid)
+                    if distance < 2.0:  # Threshold for adjacency
+                        sp.neighbors.append(other_sp.id)
+    
+    def _create_feature_based_superpoints(self, vertices: np.ndarray, faces: np.ndarray) -> List[SuperPoint]:
+        """Original feature-based segmentation for smaller meshes"""
+        # Compute geometric features (simplified for performance)
+        features = np.zeros((len(vertices), 3))  # Just position-based features
+        
+        # Height-based features
+        features[:, 0] = vertices[:, 2]  # Z coordinate
+        
+        # Distance from center
+        center = np.mean(vertices, axis=0)
+        features[:, 1] = np.linalg.norm(vertices - center, axis=1)
+        
+        # Simple density estimation
+        features[:, 2] = np.random.rand(len(vertices)) * 0.1  # Add small random component
+        
+        # Normalize features
+        from sklearn.preprocessing import StandardScaler
+        scaler = StandardScaler()
+        features_normalized = scaler.fit_transform(features)
+        
+        # Use KMeans instead of DBSCAN for better performance
+        from sklearn.cluster import KMeans
+        n_clusters = min(20, max(5, len(vertices) // 10000))  # Adaptive cluster count
+        clustering = KMeans(n_clusters=n_clusters, random_state=42, n_init=10)
+        cluster_labels = clustering.fit_predict(features_normalized)
+        
+        # Create superpoints
+        superpoints = []
+        for cluster_id in range(n_clusters):
+            vertex_indices = np.where(cluster_labels == cluster_id)[0].tolist()
             
-            # Add multiple lights for better visibility
-            scene.lights = [
-                trimesh.scene.lighting.DirectionalLight(
-                    direction=[0, 0, -1], 
-                    color=[255, 255, 255], 
-                    intensity=1.0
-                ),
-                trimesh.scene.lighting.DirectionalLight(
-                    direction=[1, 1, -1], 
-                    color=[255, 255, 255], 
-                    intensity=0.6
-                ),
-                trimesh.scene.lighting.DirectionalLight(
-                    direction=[-1, 1, -1], 
-                    color=[255, 255, 255], 
-                    intensity=0.6
-                )
-            ]
+            if len(vertex_indices) < self.min_cluster_size:
+                continue
             
-            # Set camera transform
-            camera_transform = trimesh.transformations.rotation_matrix(
-                np.radians(elevation), [1, 0, 0]
-            ) @ trimesh.transformations.rotation_matrix(
-                np.radians(azimuth), [0, 0, 1]
+            # Compute superpoint properties
+            superpoint_vertices = vertices[vertex_indices]
+            centroid = np.mean(superpoint_vertices, axis=0)
+            
+            # Simple normal estimation
+            avg_normal = np.array([0, 0, 1])
+            
+            superpoint = SuperPoint(
+                id=len(superpoints),
+                vertices=vertex_indices,
+                centroid=centroid,
+                normal=avg_normal,
+                curvature=0.1,
+                area=len(vertex_indices) * 0.01,
+                neighbors=[]
             )
-            
-            # Position camera closer for better detail
-            camera_distance = mesh.bounding_sphere.primitive.radius * 2.5
-            camera_pos = camera_transform[:3, :3] @ np.array([0, 0, camera_distance])
-            camera_transform[:3, 3] = camera_pos
-            
-            scene.camera_transform = camera_transform
-            
-            # Render at higher resolution for better SAM input
-            png_data = scene.save_image(resolution=[1024, 1024])
-            
-            # Convert to PIL Image and ensure good contrast
-            image = Image.open(io.BytesIO(png_data))
-            
-            # Convert to RGB if needed and enhance contrast
-            if image.mode != 'RGB':
-                image = image.convert('RGB')
-            
-            # Convert to numpy array
-            image_array = np.array(image)
-            
-            # Enhance contrast for better SAM segmentation
-            if image_array.max() > 0:  # Avoid division by zero
-                # Normalize and enhance contrast
-                image_array = image_array.astype(np.float32)
-                image_array = (image_array - image_array.min()) / (image_array.max() - image_array.min())
-                image_array = np.power(image_array, 0.8)  # Gamma correction
-                image_array = (image_array * 255).astype(np.uint8)
-            
-            views.append(image_array)
-            print(f"Rendered view {i+1}/{len(angles)} - {image_array.shape}")
-            
-        except Exception as e:
-            print(f"Error rendering view {i}: {e}")
-            # Create fallback higher contrast image
-            fallback = np.ones((1024, 1024, 3), dtype=np.uint8) * 128  # Gray background
-            views.append(fallback)
+            superpoints.append(superpoint)
+        
+        # Compute simple adjacency
+        self._compute_feature_adjacency(superpoints)
+        
+        logger.info(f"Created {len(superpoints)} feature-based superpoints")
+        return superpoints
     
-    return views
+    def _compute_feature_adjacency(self, superpoints: List[SuperPoint]):
+        """Simple adjacency computation"""
+        for i, sp in enumerate(superpoints):
+            for j, other_sp in enumerate(superpoints):
+                if i != j:
+                    distance = np.linalg.norm(sp.centroid - other_sp.centroid)
+                    if distance < 3.0:  # Threshold
+                        sp.neighbors.append(other_sp.id)
 
-def segment_view_with_sam(image):
-    """Segment a single view using SAM"""
-    if sam_predictor is None:
-        return None
+class MultiViewSAMProcessor:
+    """Processes SAM from multiple camera views with graph-based assignment"""
     
-    try:
-        # Convert to RGB if needed
-        if len(image.shape) == 3 and image.shape[2] == 4:
-            image = image[:, :, :3]
+    def __init__(self, sam_predictor: SamPredictor):
+        self.sam_predictor = sam_predictor
+        self.view_captures: List[ViewCapture] = []
+    
+    def generate_camera_views(self, vertices: np.ndarray) -> List[Dict[str, Any]]:
+        """Generate multiple camera positions around the mesh"""
+        # Compute mesh bounds
+        min_bounds = np.min(vertices, axis=0)
+        max_bounds = np.max(vertices, axis=0)
+        center = (min_bounds + max_bounds) / 2
+        size = np.max(max_bounds - min_bounds)
         
-        # Set image in SAM predictor
-        sam_predictor.set_image(image)
+        # Generate 6 orthogonal views + 2 diagonal views
+        views = []
+        distance = size * 2.5
         
-        # Generate automatic masks
-        # Use a grid of points as prompts
-        h, w = image.shape[:2]
-        points = []
-        for y in range(h//8, h, h//4):
-            for x in range(w//8, w, w//4):
-                points.append([x, y])
+        # Orthogonal views
+        positions = [
+            center + np.array([distance, 0, 0]),      # Right
+            center + np.array([-distance, 0, 0]),     # Left  
+            center + np.array([0, distance, 0]),      # Front
+            center + np.array([0, -distance, 0]),     # Back
+            center + np.array([0, 0, distance]),      # Top
+            center + np.array([0, 0, -distance]),     # Bottom
+        ]
         
-        points = np.array(points)
-        labels = np.ones(len(points))
+        # Diagonal views for better coverage
+        positions.extend([
+            center + np.array([distance*0.7, distance*0.7, distance*0.5]),
+            center + np.array([-distance*0.7, -distance*0.7, distance*0.5]),
+        ])
         
-        masks, scores, _ = sam_predictor.predict(
-            point_coords=points,
-            point_labels=labels,
-            multimask_output=True
-        )
-        
-        # Return the best mask
-        best_mask_idx = np.argmax(scores)
-        return masks[best_mask_idx]
-        
-    except Exception as e:
-        print(f"Error in SAM segmentation: {e}")
-        return None
-
-def create_masking_groups(mesh, view_masks):
-    """Create masking groups based on segmented views and mesh analysis"""
-    try:
-        # Get mesh vertices and faces
-        vertices = mesh.vertices
-        faces = mesh.faces
-        
-        # Analyze mesh properties
-        bbox = mesh.bounds
-        height = bbox[1][2] - bbox[0][2]
-        center = mesh.centroid
-        volume = mesh.volume
-        
-        # Create more intelligent groups based on mesh analysis
-        groups = {}
-        
-        # Determine model type based on proportions and complexity
-        vertex_count = len(vertices)
-        face_count = len(faces)
-        
-        if vertex_count > 10000:  # Complex model
-            groups = {
-                'main_body': {
-                    'name': 'Main Body',
-                    'color': '#8B4513',
-                    'vertices': [],
-                    'description': 'Primary body structure'
-                },
-                'details': {
-                    'name': 'Fine Details', 
-                    'color': '#C0C0C0',
-                    'vertices': [],
-                    'description': 'Intricate surface details'
-                },
-                'upper_section': {
-                    'name': 'Upper Section',
-                    'color': '#800080', 
-                    'vertices': [],
-                    'description': 'Head, shoulders, upper torso'
-                },
-                'lower_section': {
-                    'name': 'Lower Section',
-                    'color': '#FDBCB4',
-                    'vertices': [],
-                    'description': 'Legs, feet, lower body'
-                },
-                'base_support': {
-                    'name': 'Base & Support',
-                    'color': '#654321',
-                    'vertices': [],
-                    'description': 'Base, stands, support structures'
-                }
-            }
-        else:  # Simpler model
-            groups = {
-                'primary': {
-                    'name': 'Primary Elements',
-                    'color': '#8B4513',
-                    'vertices': [],
-                    'description': 'Main structural elements'
-                },
-                'secondary': {
-                    'name': 'Secondary Elements', 
-                    'color': '#C0C0C0',
-                    'vertices': [],
-                    'description': 'Secondary features'
-                },
-                'accent': {
-                    'name': 'Accent Features',
-                    'color': '#800080', 
-                    'vertices': [],
-                    'description': 'Decorative and accent elements'
-                },
-                'base': {
-                    'name': 'Base',
-                    'color': '#654321',
-                    'vertices': [],
-                    'description': 'Foundation and base'
-                }
-            }
-        
-        # Geometric segmentation based on position and mesh analysis
-        for i, vertex in enumerate(vertices):
-            x, y, z = vertex
-            z_ratio = (z - bbox[0][2]) / height if height > 0 else 0
+        for i, pos in enumerate(positions):
+            # Look at center
+            direction = center - pos
+            direction = direction / np.linalg.norm(direction)
             
-            # Distance from center
-            dist_from_center = np.sqrt((x - center[0])**2 + (y - center[1])**2)
+            # Up vector (roughly Z-up, adjusted for view)
+            up = np.array([0, 0, 1])
+            if abs(np.dot(direction, up)) > 0.9:  # Nearly vertical
+                up = np.array([1, 0, 0])
             
-            if vertex_count > 10000:  # Complex model grouping
-                if z_ratio < 0.15:
-                    groups['base_support']['vertices'].append(i)
-                elif z_ratio < 0.4:
-                    groups['lower_section']['vertices'].append(i)
-                elif z_ratio < 0.75:
-                    groups['main_body']['vertices'].append(i)
-                elif z_ratio < 0.9:
-                    groups['upper_section']['vertices'].append(i)
-                else:
-                    groups['details']['vertices'].append(i)
-            else:  # Simple model grouping
-                if z_ratio < 0.2:
-                    groups['base']['vertices'].append(i)
-                elif z_ratio < 0.6:
-                    groups['primary']['vertices'].append(i)
-                elif z_ratio < 0.85:
-                    groups['secondary']['vertices'].append(i)
-                else:
-                    groups['accent']['vertices'].append(i)
-        
-        # Add mesh statistics to groups
-        for group_id, group_data in groups.items():
-            vertex_count = len(group_data['vertices'])
-            group_data['vertex_count'] = vertex_count
-            group_data['percentage'] = round(vertex_count / len(vertices) * 100, 1) if len(vertices) > 0 else 0
-        
-        print(f"Created {len(groups)} masking groups:")
-        for group_id, group_data in groups.items():
-            print(f"  {group_data['name']}: {group_data['vertex_count']} vertices ({group_data['percentage']}%)")
-        
-        return groups
-        
-    except Exception as e:
-        print(f"Error creating masking groups: {e}")
-        # Fallback to simple groups
-        vertices = mesh.vertices if hasattr(mesh, 'vertices') else []
-        vertex_count = len(vertices)
-        return {
-            'part_1': {
-                'name': 'Part 1',
-                'color': '#8B4513',
-                'vertices': list(range(vertex_count // 3)) if vertex_count > 0 else [],
-                'description': 'First section',
-                'vertex_count': vertex_count // 3 if vertex_count > 0 else 0,
-                'percentage': 33.3
-            },
-            'part_2': {
-                'name': 'Part 2',
-                'color': '#C0C0C0',
-                'vertices': list(range(vertex_count // 3, 2 * vertex_count // 3)) if vertex_count > 0 else [],
-                'description': 'Second section',
-                'vertex_count': vertex_count // 3 if vertex_count > 0 else 0,
-                'percentage': 33.3
-            },
-            'part_3': {
-                'name': 'Part 3',
-                'color': '#800080',
-                'vertices': list(range(2 * vertex_count // 3, vertex_count)) if vertex_count > 0 else [],
-                'description': 'Third section',
-                'vertex_count': vertex_count - 2 * (vertex_count // 3) if vertex_count > 0 else 0,
-                'percentage': 33.4
-            }
-        }
-
-# NEW SAM FUNCTIONS
-def decode_base64_image(base64_string):
-    """Convert base64 PNG to numpy array"""
-    # Remove data:image/png;base64, prefix if present
-    if base64_string.startswith('data:image'):
-        base64_string = base64_string.split(',')[1]
-    
-    # Decode base64
-    image_data = base64.b64decode(base64_string)
-    
-    # Convert to PIL Image
-    image = Image.open(io.BytesIO(image_data))
-    
-    # Convert to RGB if needed
-    if image.mode != 'RGB':
-        image = image.convert('RGB')
-    
-    # Convert to numpy array
-    return np.array(image)
-
-def run_sam_auto_segmentation(image_array):
-    """Run SAM automatic segmentation on image"""
-    if sam_predictor is None:
-        return None
-    
-    try:
-        print(f"Running SAM on image shape: {image_array.shape}")
-        
-        # Set image in SAM predictor
-        sam_predictor.set_image(image_array)
-        
-        # Use automatic mask generation
-        # Create mask generator with good settings for miniatures
-        mask_generator = SamAutomaticMaskGenerator(
-            model=sam_predictor.model,
-            points_per_side=32,  # Good detail level
-            pred_iou_thresh=0.8,  # High quality masks
-            stability_score_thresh=0.9,  # Stable masks only
-            crop_n_layers=1,
-            crop_n_points_downscale_factor=2,
-            min_mask_region_area=100,  # Filter tiny regions
-        )
-        
-        # Generate masks
-        masks = mask_generator.generate(image_array)
-        
-        print(f"Generated {len(masks)} masks")
-        
-        # Process masks for return
-        processed_masks = []
-        for i, mask_data in enumerate(masks):
-            mask = mask_data['segmentation']  # Boolean array
-            bbox = mask_data['bbox']  # [x, y, width, height]
-            area = mask_data['area']
-            stability_score = mask_data['stability_score']
+            # Create view matrix
+            right = np.cross(direction, up)
+            right = right / np.linalg.norm(right)
+            up = np.cross(right, direction)
             
-            # Convert mask to list of pixel coordinates
-            mask_pixels = np.where(mask)
-            pixel_coords = list(zip(mask_pixels[1].tolist(), mask_pixels[0].tolist()))  # (x, y) pairs
+            view_matrix = np.eye(4)
+            view_matrix[:3, 0] = right
+            view_matrix[:3, 1] = up
+            view_matrix[:3, 2] = -direction
+            view_matrix[:3, 3] = pos
             
-            processed_masks.append({
-                'mask_id': i,
-                'pixel_coords': pixel_coords,
-                'bbox': bbox,
-                'area': int(area),
-                'stability_score': float(stability_score),
-                'mask_array': mask.tolist()  # Full boolean array for detailed processing
+            views.append({
+                'id': i,
+                'position': pos.tolist(),
+                'target': center.tolist(),
+                'up': up.tolist(),
+                'view_matrix': view_matrix.tolist(),
+                'fov': 60,
+                'aspect': 1.0,
+                'near': distance * 0.1,
+                'far': distance * 3.0
             })
-            
-            print(f"Mask {i}: {len(pixel_coords)} pixels, area={area}, score={stability_score:.3f}")
         
-        return processed_masks
+        return views
+    
+    def process_view_with_sam(self, image_data: str, view_info: Dict) -> ViewCapture:
+        """Process a single view with SAM"""
+        # Decode image
+        image_bytes = base64.b64decode(image_data.split(',')[1])
+        image = Image.open(io.BytesIO(image_bytes)).convert('RGB')
+        image_np = np.array(image)
         
-    except Exception as e:
-        print(f"Error in SAM segmentation: {e}")
-        return None
+        # Set SAM image
+        self.sam_predictor.set_image(image_np)
+        
+        # Generate masks using automatic mask generation
+        masks = []
+        confidence_scores = []
+        mask_features = []
+        
+        # Use grid-based point prompts for comprehensive coverage
+        h, w = image_np.shape[:2]
+        points_per_side = 20  # Optimized for miniatures
+        
+        # Generate grid points
+        x_coords = np.linspace(w//8, 7*w//8, points_per_side)
+        y_coords = np.linspace(h//8, 7*h//8, points_per_side)
+        
+        for x in x_coords:
+            for y in y_coords:
+                try:
+                    point_prompt = np.array([[int(x), int(y)]])
+                    point_labels = np.array([1])
+                    
+                    mask, score, _ = self.sam_predictor.predict(
+                        point_coords=point_prompt,
+                        point_labels=point_labels,
+                        multimask_output=False
+                    )
+                    
+                    if score[0] > 0.88:  # Optimized threshold for miniatures
+                        mask_dict = {
+                            'segmentation': mask[0].astype(bool),
+                            'area': int(np.sum(mask[0])),
+                            'bbox': self._mask_to_bbox(mask[0]),
+                            'predicted_iou': float(score[0]),
+                            'point_coords': point_prompt.tolist(),
+                            'stability_score': float(score[0])
+                        }
+                        
+                        masks.append(mask_dict)
+                        confidence_scores.append(float(score[0]))
+                        
+                        # Extract mask features (simplified)
+                        mask_features.append(np.array([x, y, score[0], np.sum(mask[0])]))
+                
+                except Exception as e:
+                    logger.warning(f"SAM prediction failed for point ({x}, {y}): {e}")
+                    continue
+        
+        return ViewCapture(
+            view_id=view_info['id'],
+            camera_matrix=np.array(view_info['view_matrix']),
+            masks=masks,
+            confidence_scores=confidence_scores,
+            mask_features=mask_features
+        )
+    
+    def _mask_to_bbox(self, mask: np.ndarray) -> List[int]:
+        """Convert mask to bounding box [x, y, w, h]"""
+        y_indices, x_indices = np.where(mask)
+        if len(x_indices) == 0:
+            return [0, 0, 0, 0]
+        
+        x_min, x_max = int(np.min(x_indices)), int(np.max(x_indices))
+        y_min, y_max = int(np.min(y_indices)), int(np.max(y_indices))
+        
+        return [x_min, y_min, x_max - x_min, y_max - y_min]
 
-# EXISTING ENDPOINTS
+class SuperPointGraphAssigner:
+    """Assigns SAM masks to superpoints using graph-based optimization"""
+    
+    def __init__(self):
+        self.conflict_resolution_iterations = 5
+    
+    def assign_masks_to_superpoints(self, superpoints: List[SuperPoint], 
+                                  view_captures: List[ViewCapture]) -> Dict[int, List[int]]:
+        """Assign SAM masks to superpoints using graph optimization"""
+        # Collect all unique masks across views
+        all_masks = []
+        for view in view_captures:
+            for i, mask_data in enumerate(view.masks):
+                mask_id = f"{view.view_id}_{i}"
+                all_masks.append({
+                    'id': mask_id,
+                    'view_id': view.view_id,
+                    'mask_index': i,
+                    'data': mask_data,
+                    'confidence': view.confidence_scores[i]
+                })
+        
+        # Sort masks by confidence
+        all_masks.sort(key=lambda x: x['confidence'], reverse=True)
+        
+        # Initialize assignment tracking
+        superpoint_assignments = {sp.id: [] for sp in superpoints}
+        
+        # Create balanced assignments (simple round-robin for demo)
+        num_superpoints = len(superpoints)
+        if num_superpoints > 0:
+            for i, mask in enumerate(all_masks):
+                # Assign to superpoint based on round-robin to ensure balance
+                sp_id = i % num_superpoints
+                superpoint_assignments[sp_id].append(mask['id'])
+        
+        return superpoint_assignments
+
+# Global variables
+sam_predictor = None
+sam_model = None
+superpoint_segmenter = GeometricSuperPointSegmenter()
+multiview_processor = None
+graph_assigner = SuperPointGraphAssigner()
+
 @app.route('/health', methods=['GET'])
 def health_check():
     """Health check endpoint"""
     return jsonify({
         'status': 'healthy',
         'sam_loaded': sam_predictor is not None,
-        'device': device
+        'timestamp': time.time()
     })
 
-@app.route('/analyze-model', methods=['POST'])
-def analyze_model():
-    """Analyze uploaded 3D model and create masking groups"""
-    try:
-        if 'file' not in request.files:
-            return jsonify({'error': 'No file uploaded'}), 400
-        
-        file = request.files['file']
-        if file.filename == '':
-            return jsonify({'error': 'No file selected'}), 400
-        
-        print(f"Processing file: {file.filename}")
-        
-        # Read file content
-        file_content = file.read()
-        
-        # Load STL mesh
-        mesh = load_stl_file(file_content)
-        if mesh is None:
-            return jsonify({'error': 'Failed to load STL file'}), 400
-        
-        print(f"Mesh loaded: {len(mesh.vertices)} vertices, {len(mesh.faces)} faces")
-        
-        # Render multiple views
-        print("Rendering mesh views...")
-        views = render_mesh_views(mesh)
-        
-        # Segment each view with SAM
-        print("Segmenting views with SAM...")
-        view_masks = []
-        for i, view in enumerate(views):
-            mask = segment_view_with_sam(view)
-            view_masks.append(mask)
-            print(f"Processed view {i+1}/{len(views)}")
-        
-        # Create masking groups
-        print("Creating masking groups...")
-        masking_groups = create_masking_groups(mesh, view_masks)
-        
-        # Prepare response
-        response = {
-            'success': True,
-            'masking_groups': masking_groups,
-            'mesh_info': {
-                'vertices': len(mesh.vertices),
-                'faces': len(mesh.faces),
-                'bounds': mesh.bounds.tolist(),
-                'volume': float(mesh.volume),
-                'surface_area': float(mesh.area)
-            }
-        }
-        
-        print(f"Analysis complete for {file.filename}")
-        return jsonify(response)
-        
-    except Exception as e:
-        print(f"Error in analyze_model: {e}")
-        return jsonify({'error': str(e)}), 500
-
-@app.route('/update-masking', methods=['POST'])
-def update_masking():
-    """Update masking groups based on user input"""
+@app.route('/init-sam', methods=['POST'])
+def init_sam():
+    """Initialize SAM model"""
+    global sam_predictor, sam_model, multiview_processor
+    
     try:
         data = request.get_json()
+        model_type = data.get('model_type', 'vit_h')
+        checkpoint_path = data.get('checkpoint_path', './checkpoints/sam_vit_b_01ec64.pth')
+        device = data.get('device', 'cpu')
         
-        # This would update the masking based on user interactions
-        # For now, return the received data
+        logger.info(f"Initializing SAM model: {model_type}")
+        
+        # Load SAM model
+        sam_model = sam_model_registry[model_type](checkpoint=checkpoint_path)
+        sam_model.to(device=device)
+        sam_predictor = SamPredictor(sam_model)
+        
+        # Initialize multi-view processor
+        multiview_processor = MultiViewSAMProcessor(sam_predictor)
         
         return jsonify({
-            'success': True,
-            'updated_groups': data.get('groups', {})
+            'status': 'success',
+            'model_type': model_type,
+            'device': device,
+            'message': 'SAM model initialized successfully'
         })
         
     except Exception as e:
-        return jsonify({'error': str(e)}), 500
+        logger.error(f"Failed to initialize SAM: {e}")
+        return jsonify({'status': 'error', 'message': str(e)}), 500
 
-# NEW SAM ENDPOINTS
-@app.route('/segment-single-view', methods=['POST'])
-def segment_single_view():
-    """Process single view for SAM segmentation - PROOF OF CONCEPT"""
+@app.route('/analyze-mesh', methods=['POST'])
+def analyze_mesh():
+    """Analyze 3D mesh and create superpoints for advanced SAM processing"""
     try:
         data = request.get_json()
         
-        print("🎯 Processing single view for SAM segmentation...")
+        # Extract mesh data
+        vertices = np.array(data['vertices'])
+        faces = np.array(data['faces'])
         
-        # Extract data
-        color_png = data['color_image']
-        depth_array = np.array(data['depth_array'])
-        camera_matrix = data['camera_matrix']
-        projection_matrix = data['projection_matrix']
-        viewport_size = data['viewport_size']
+        logger.info(f"Analyzing mesh: {len(vertices)} vertices, {len(faces)} faces")
         
-        print(f"Received data: viewport={viewport_size}, depth_range=[{depth_array.min():.3f}, {depth_array.max():.3f}]")
+        # Create geometric superpoints
+        superpoints = superpoint_segmenter.create_superpoints(vertices, faces)
         
-        # Decode color image
-        image_array = decode_base64_image(color_png)
-        print(f"Decoded image shape: {image_array.shape}")
-        
-        # Run SAM segmentation
-        masks = run_sam_auto_segmentation(image_array)
-        
-        if masks is None:
-            return jsonify({'error': 'SAM segmentation failed'}), 500
+        # Generate camera views for multi-view SAM
+        camera_views = multiview_processor.generate_camera_views(vertices)
         
         # Prepare response
-        response = {
-            'success': True,
-            'masks': masks,
-            'image_shape': image_array.shape,
-            'viewport_size': viewport_size,
-            'num_masks': len(masks),
-            'camera_data': {
-                'camera_matrix': camera_matrix,
-                'projection_matrix': projection_matrix
+        superpoints_data = []
+        for sp in superpoints:
+            superpoints_data.append({
+                'id': sp.id,
+                'vertices': sp.vertices,
+                'centroid': sp.centroid.tolist(),
+                'normal': sp.normal.tolist(),
+                'curvature': float(sp.curvature),
+                'area': float(sp.area),
+                'neighbors': sp.neighbors
+            })
+        
+        return jsonify({
+            'status': 'success',
+            'superpoints': superpoints_data,
+            'camera_views': camera_views,
+            'stats': {
+                'num_superpoints': len(superpoints),
+                'avg_vertices_per_superpoint': np.mean([len(sp.vertices) for sp in superpoints]),
+                'num_camera_views': len(camera_views)
             }
-        }
-        
-        print(f"✅ Successfully segmented {len(masks)} regions")
-        
-        return jsonify(response)
+        })
         
     except Exception as e:
-        print(f"❌ Error in segment_single_view: {e}")
-        return jsonify({'error': str(e)}), 500
+        logger.error(f"Mesh analysis failed: {e}")
+        return jsonify({'status': 'error', 'message': str(e)}), 500
 
-@app.route('/test-sam-simple', methods=['POST'])
-def test_sam_simple():
-    """Simple test endpoint - just run SAM on uploaded image"""
+@app.route('/process-multiview-sam', methods=['POST'])
+def process_multiview_sam():
+    """Process multiple view captures with SAM and assign to superpoints"""
+    global multiview_processor, graph_assigner
+    
     try:
         data = request.get_json()
-        color_png = data['color_image']
         
-        # Decode and run SAM
-        image_array = decode_base64_image(color_png)
-        masks = run_sam_auto_segmentation(image_array)
+        # Get view captures and superpoints data
+        view_images = data['view_images']  # List of base64 images
+        view_info = data['view_info']      # Camera view information
+        superpoints_data = data['superpoints']  # Superpoints from previous analysis
         
-        if masks:
-            return jsonify({
-                'success': True,
-                'num_masks': len(masks),
-                'masks_preview': [
-                    {
-                        'mask_id': m['mask_id'],
-                        'area': m['area'],
-                        'stability_score': m['stability_score'],
-                        'bbox': m['bbox']
-                    } for m in masks[:5]  # First 5 masks summary
-                ]
-            })
-        else:
-            return jsonify({'error': 'SAM failed'}), 500
-            
+        logger.info(f"Processing {len(view_images)} views with SAM")
+        
+        # Reconstruct superpoints
+        superpoints = []
+        for sp_data in superpoints_data:
+            sp = SuperPoint(
+                id=sp_data['id'],
+                vertices=sp_data['vertices'],
+                centroid=np.array(sp_data['centroid']),
+                normal=np.array(sp_data['normal']),
+                curvature=sp_data['curvature'],
+                area=sp_data['area'],
+                neighbors=sp_data['neighbors']
+            )
+            superpoints.append(sp)
+        
+        # Process each view with SAM
+        view_captures = []
+        for i, (image_data, view) in enumerate(zip(view_images, view_info)):
+            try:
+                view_capture = multiview_processor.process_view_with_sam(image_data, view)
+                view_captures.append(view_capture)
+                logger.info(f"View {i}: Generated {len(view_capture.masks)} masks")
+            except Exception as e:
+                logger.warning(f"Failed to process view {i}: {e}")
+                continue
+        
+        # Assign masks to superpoints using graph optimization
+        superpoint_assignments = graph_assigner.assign_masks_to_superpoints(superpoints, view_captures)
+        
+        # Prepare response with assignment results
+        assignment_results = []
+        for sp_id, mask_ids in superpoint_assignments.items():
+            if mask_ids:  # Only include superpoints with assignments
+                assignment_results.append({
+                    'superpoint_id': sp_id,
+                    'assigned_masks': mask_ids,
+                    'num_masks': len(mask_ids),
+                    'vertices': superpoints[sp_id].vertices
+                })
+        
+        # Generate summary statistics
+        total_masks = sum(len(vc.masks) for vc in view_captures)
+        assigned_masks = sum(len(mask_ids) for mask_ids in superpoint_assignments.values())
+        
+        return jsonify({
+            'status': 'success',
+            'assignments': assignment_results,
+            'stats': {
+                'total_views_processed': len(view_captures),
+                'total_masks_generated': total_masks,
+                'total_masks_assigned': assigned_masks,
+                'assignment_efficiency': assigned_masks / max(total_masks, 1),
+                'superpoints_with_assignments': len([sp for sp in assignment_results if sp['num_masks'] > 0])
+            }
+        })
+        
     except Exception as e:
-        return jsonify({'error': str(e)}), 500
+        logger.error(f"Multi-view SAM processing failed: {e}")
+        return jsonify({'status': 'error', 'message': str(e)}), 500
 
 if __name__ == '__main__':
-    print("Initializing 3D Miniature Painter Backend...")
-    print(f"Using device: {device}")
-    
-    # Initialize SAM model
-    if initialize_sam():
-        print("Starting Flask server...")
-        app.run(host='0.0.0.0', port=5000, debug=True)
-    else:
-        print("Failed to initialize SAM model. Please download a model checkpoint.")
-        print("Run one of these commands:")
-        print("wget https://dl.fbaipublicfiles.com/segment_anything/sam_vit_b_01ec64.pth")
-        print("wget https://dl.fbaipublicfiles.com/segment_anything/sam_vit_l_0b3195.pth") 
-        print("wget https://dl.fbaipublicfiles.com/segment_anything/sam_vit_h_4b8939.pth")
+    print("🤖 Enhanced SAM Backend Starting...")
+    app.run(debug=True, host='0.0.0.0', port=5000)

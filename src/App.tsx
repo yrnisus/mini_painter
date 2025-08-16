@@ -1,788 +1,1052 @@
-import React, { useState, useCallback, useEffect, useRef } from 'react';
-import { Upload, Brain, Zap } from 'lucide-react';
+// src/App.tsx - Main Application Component with Enhanced SAM Integration
+import React, { useRef, useEffect, useState, useCallback } from 'react';
 import * as THREE from 'three';
+import { Camera, Upload, Palette, Download, Layers, Bot, RefreshCw, CheckCircle, AlertCircle, Cpu } from 'lucide-react';
 
-// Import our modular components
-import FileUpload from './components/FileUpload';
-import ThreeScene from './components/ThreeScene';
-import BackgroundPicker from './components/BackgroundPicker';
-import ColorPicker from './components/ColorPicker';
-import MaskingPanel from './components/MaskingPanel';
-import ModelInfo from './components/ModelInfo';
+// Inline SAM service types and functionality
+interface SuperPoint {
+  id: number;
+  vertices: number[];
+  centroid: [number, number, number];
+  normal: [number, number, number];
+  curvature: number;
+  area: number;
+  neighbors: number[];
+}
 
-// Import types and utilities
-import { ModelData, PaintColors, MaskingGroup } from './types/index';
-import { loadSTLFile } from './utils/stlLoader';
-import { PAINT_COLORS, MASKING_GROUPS } from './utils/constants';
-import { setSAMMapping, clearSAMMapping } from './utils/maskingUtils';
-import { processSAMResults } from './utils/samTo3DMapper';
-import { enhancedMultiViewSAMTest } from './utils/multiViewSAMCapture';
+interface CameraView {
+  id: number;
+  position: [number, number, number];
+  target: [number, number, number];
+  up: [number, number, number];
+  view_matrix: number[][];
+  fov: number;
+  aspect: number;
+  near: number;
+  far: number;
+}
 
-const App: React.FC = () => {
-  const [modelData, setModelData] = useState<ModelData | null>(null);
-  const [isLoading, setIsLoading] = useState<boolean>(false);
-  const [paintColors, setPaintColors] = useState<PaintColors>({});
-  const [maskingGroups, setMaskingGroups] = useState<MaskingGroup[]>(MASKING_GROUPS);
-  const [selectedGroup, setSelectedGroup] = useState<string>('armor');
-  const [selectedColor, setSelectedColor] = useState<string>('#FF0000');
-  const [backgroundColor, setBackgroundColor] = useState<number>(0xffffff);
-  const [aiAnalysis, setAiAnalysis] = useState<any>(null);
-  const [backendStatus, setBackendStatus] = useState<'unknown' | 'connected' | 'error'>('unknown');
+interface SuperPointAssignment {
+  superpoint_id: number;
+  assigned_masks: string[];
+  num_masks: number;
+  vertices: number[];
+}
 
-  // SAM Groups State
-  const [useSAMGroups, setUseSAMGroups] = useState<boolean>(false);
-  const [samMasks, setSamMasks] = useState<any[]>([]);
-  const [samGroupsData, setSamGroupsData] = useState<any>(null);
-  const [samMaskGroups, setSamMaskGroups] = useState<MaskingGroup[]>([]);
-  const [samSemanticGroups, setSamSemanticGroups] = useState<MaskingGroup[]>([]);
-  const [samGroupMode, setSamGroupMode] = useState<'individual' | 'semantic'>('individual');
+interface MeshAnalysisResult {
+  status: string;
+  superpoints: SuperPoint[];
+  camera_views: CameraView[];
+  stats: {
+    num_superpoints: number;
+    avg_vertices_per_superpoint: number;
+    num_camera_views: number;
+  };
+}
 
-  // NEW: Refs for SAM 3D mapping integration
-  const meshRef = useRef<THREE.Mesh | null>(null);
-  const cameraRef = useRef<THREE.PerspectiveCamera | null>(null);
-  const rendererRef = useRef<THREE.WebGLRenderer | null>(null);
+interface SAMProcessingResult {
+  status: string;
+  assignments: SuperPointAssignment[];
+  stats: {
+    total_views_processed: number;
+    total_masks_generated: number;
+    total_masks_assigned: number;
+    assignment_efficiency: number;
+    superpoints_with_assignments: number;
+  };
+}
 
-  // Check backend connection on component mount
-  useEffect(() => {
-    checkBackendConnection();
-  }, []);
+// Inline SAM Service
+class EnhancedSAMService {
+  private baseUrl: string;
+  private isInitialized: boolean = false;
 
-  // ENHANCED: SAM results handler with 3D mapping integration
-  useEffect(() => {
-    (window as any).onSAMResults = (results: any) => {
-      console.log('🎭 SAM Results received:', results);
-      console.log(`Processing ${results.masks.length} detected regions for 3D mapping`);
-      
-      setSamMasks(results.masks);
-      setSamGroupsData(results);
-      
-      // CRITICAL: Check if we have mesh and scene refs available for 3D mapping
-      if (meshRef.current && cameraRef.current && rendererRef.current) {
-        console.log('🔗 Scene ready - processing SAM results with 3D mapping...');
-        
-        try {
-          // Process SAM results to create pixel-to-vertex mapping
-          const { vertexMapping, maskingGroups } = processSAMResults(
-            results,
-            meshRef.current,
-            cameraRef.current,
-            rendererRef.current
-          );
-          
-          const totalVertexAssignments = Object.values(vertexMapping).reduce((sum, vertices) => sum + (vertices as number[]).length, 0);
-          
-          console.log(`✅ SAM 3D mapping complete:`);
-          console.log(`   Regions detected: ${results.masks.length}`);
-          console.log(`   UI groups created: ${maskingGroups.length}`);
-          console.log(`   Total vertex assignments: ${totalVertexAssignments}`);
-          
-          // Set the SAM mapping globally for maskingUtils to use
-          const viewData = {
-            camera_matrix: results.camera_data?.camera_matrix || cameraRef.current.matrixWorld.toArray(),
-            projection_matrix: results.camera_data?.projection_matrix || cameraRef.current.projectionMatrix.toArray(),
-            viewport_size: results.viewport_size || { width: 1024, height: 1024 }
-          };
-          
-          setSAMMapping(vertexMapping, viewData);
-          console.log('🔗 SAM vertex mapping stored globally');
-          
-          // Update UI state with real SAM groups
-          setSamMaskGroups(maskingGroups);
-          
-          // Keep semantic groups as fallback option
-          const samSemanticGroups: MaskingGroup[] = [
-            { id: 'sam_main_body', name: 'SAM Main Body', color: '#8B4513', visible: true },
-            { id: 'sam_weapon', name: 'SAM Weapon', color: '#C0C0C0', visible: true },
-            { id: 'sam_shield', name: 'SAM Shield', color: '#800080', visible: true },
-            { id: 'sam_helmet', name: 'SAM Helmet', color: '#FFD700', visible: true },
-            { id: 'sam_details', name: 'SAM Details', color: '#FF4500', visible: true },
-            { id: 'sam_base', name: 'SAM Base', color: '#654321', visible: true }
-          ];
-          
-          setSamSemanticGroups(samSemanticGroups);
-          
-          // Switch to individual mode to show all detected regions with real vertex assignments
-          setSamGroupMode('individual');
-          setUseSAMGroups(true);
-          
-          console.log(`🎭 SAM integration complete - showing ${maskingGroups.length} regions with real 3D vertex assignments`);
-          console.log('Expected result: Each SAM region should now have >0 vertices assigned');
-          
-        } catch (error) {
-          console.error('❌ Error processing SAM results for 3D mapping:', error);
-          
-          // Fallback: Create UI groups without 3D mapping (original behavior)
-          const fallbackGroups = results.masks.map((mask: any, index: number) => ({
-            id: `sam_mask_${mask.mask_id}`,
-            name: `Region ${mask.mask_id + 1} (${mask.area} px)`,
-            color: `hsl(${(mask.mask_id * 137.5) % 360}, 70%, 60%)`,
-            visible: true
-          }));
-          
-          setSamMaskGroups(fallbackGroups);
-          setSamGroupMode('individual');
-          setUseSAMGroups(true);
-          
-          console.log('⚠️ SAM UI created without 3D mapping due to error - groups will have 0 vertices');
-        }
-      } else {
-        console.log('⚠️ Scene not ready for 3D mapping - creating UI-only SAM groups');
-        console.log('Scene refs status:', {
-          mesh: !!meshRef.current,
-          camera: !!cameraRef.current,
-          renderer: !!rendererRef.current
-        });
-        
-        // Create UI groups without 3D mapping (will show 0 vertices)
-        const uiOnlyGroups = results.masks.map((mask: any, index: number) => ({
-          id: `sam_mask_${mask.mask_id}`,
-          name: `Region ${mask.mask_id + 1} (${mask.area} px)`,
-          color: `hsl(${(mask.mask_id * 137.5) % 360}, 70%, 60%)`,
-          visible: true
-        }));
-        
-        setSamMaskGroups(uiOnlyGroups);
-        setSamSemanticGroups([
-          { id: 'sam_main_body', name: 'SAM Main Body', color: '#8B4513', visible: true },
-          { id: 'sam_weapon', name: 'SAM Weapon', color: '#C0C0C0', visible: true },
-          { id: 'sam_shield', name: 'SAM Shield', color: '#800080', visible: true },
-          { id: 'sam_helmet', name: 'SAM Helmet', color: '#FFD700', visible: true },
-          { id: 'sam_details', name: 'SAM Details', color: '#FF4500', visible: true },
-          { id: 'sam_base', name: 'SAM Base', color: '#654321', visible: true }
-        ]);
-        
-        setSamGroupMode('individual');
-        setUseSAMGroups(true);
-        
-        console.log('⚠️ UI-only SAM groups created - 3D mapping will be applied when scene is ready');
-      }
-    };
-    
-    return () => {
-      delete (window as any).onSAMResults;
-    };
-  }, [modelData]); // Re-setup when model changes
+  constructor(baseUrl: string = 'http://localhost:5000') {
+    this.baseUrl = baseUrl;
+  }
 
-  const checkBackendConnection = async () => {
+  async initialize(modelType: string = 'vit_b'): Promise<boolean> {
     try {
-      const response = await fetch('http://localhost:5000/health');
-      if (response.ok) {
-        setBackendStatus('connected');
-        console.log('✅ Backend connected successfully');
+      const response = await fetch(`${this.baseUrl}/init-sam`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          model_type: modelType,
+          checkpoint_path: './checkpoints/sam_vit_b_01ec64.pth',
+          device: 'cpu'
+        }),
+      });
+
+      const result = await response.json();
+      this.isInitialized = result.status === 'success';
+      
+      if (!this.isInitialized) {
+        console.error('SAM initialization failed:', result.message);
+      }
+      
+      return this.isInitialized;
+    } catch (error) {
+      console.error('SAM initialization error:', error);
+      return false;
+    }
+  }
+
+  async analyzeMesh(vertices: Float32Array, faces: Uint32Array): Promise<MeshAnalysisResult | null> {
+    if (!this.isInitialized) {
+      throw new Error('SAM service not initialized');
+    }
+
+    try {
+      const verticesArray = Array.from(vertices);
+      const facesArray = Array.from(faces);
+
+      const reshapedVertices = [];
+      for (let i = 0; i < verticesArray.length; i += 3) {
+        reshapedVertices.push([
+          verticesArray[i],
+          verticesArray[i + 1],
+          verticesArray[i + 2]
+        ]);
+      }
+
+      const reshapedFaces = [];
+      for (let i = 0; i < facesArray.length; i += 3) {
+        reshapedFaces.push([
+          facesArray[i],
+          facesArray[i + 1],
+          facesArray[i + 2]
+        ]);
+      }
+
+      const response = await fetch(`${this.baseUrl}/analyze-mesh`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          vertices: reshapedVertices,
+          faces: reshapedFaces
+        }),
+      });
+
+      const result = await response.json();
+      
+      if (result.status === 'success') {
+        console.log(`Mesh analysis complete: ${result.stats.num_superpoints} superpoints created`);
+        return result;
       } else {
-        setBackendStatus('error');
+        console.error('Mesh analysis failed:', result.message);
+        return null;
       }
     } catch (error) {
-      setBackendStatus('error');
-      console.log('❌ Backend not available, using fallback mode');
+      console.error('Mesh analysis error:', error);
+      return null;
     }
-  };
+  }
 
-  // Function to get current groups based on mode
-  const getCurrentMaskingGroups = () => {
-    if (!useSAMGroups) return maskingGroups;
-    return samGroupMode === 'individual' ? samMaskGroups : samSemanticGroups;
-  };
-
-  // NEW: Enhanced SAM toggle handler with mapping management
-  const handleSAMToggle = useCallback(() => {
-    const newUseSAMGroups = !useSAMGroups;
-    setUseSAMGroups(newUseSAMGroups);
-    
-    if (!newUseSAMGroups) {
-      // Switching back to geometric mode - clear SAM mapping
-      console.log('🔄 Switching to geometric mode - clearing SAM mapping');
-      clearSAMMapping();
-    } else if (samMasks.length > 0) {
-      // Switching to SAM mode - restore SAM mapping if available
-      console.log('🎭 Switching to SAM mode - SAM mapping should be restored');
-      // The mapping should already be set from when SAM results were processed
-      // If not, we could re-process the SAM results here
-    }
-  }, [useSAMGroups, samMasks]);
-
-  // NEW: Callback to receive refs from ThreeScene
-  const handleRefsReady = useCallback((
-    mesh: THREE.Mesh | null, 
-    camera: THREE.PerspectiveCamera | null, 
-    renderer: THREE.WebGLRenderer | null
-  ) => {
-    console.log('🔗 Received refs from ThreeScene:', {
-      mesh: !!mesh,
-      camera: !!camera,
-      renderer: !!renderer
-    });
-    
-    meshRef.current = mesh;
-    cameraRef.current = camera;
-    rendererRef.current = renderer;
-    
-    // If we have pending SAM results and now have all refs, re-process them
-    if (mesh && camera && renderer && samGroupsData && samMasks.length > 0 && !useSAMGroups) {
-      console.log('🔄 Refs now ready - could re-process pending SAM results for 3D mapping');
-      // Optionally re-trigger SAM processing here
-    }
-  }, [samGroupsData, samMasks, useSAMGroups]);
-
-  const handleFileUpload = useCallback(async (file: File) => {
-    console.log('handleFileUpload called with:', file.name);
-    setIsLoading(true);
-    
+  async renderViewsAndProcessSAM(scene: THREE.Scene, meshAnalysis: MeshAnalysisResult, targetMesh: THREE.Mesh): Promise<SAMProcessingResult | null> {
     try {
-      let geometry: THREE.BufferGeometry;
+      console.log(`Rendering ${meshAnalysis.camera_views.length} views for SAM processing...`);
       
-      if (file.name.toLowerCase().endsWith('.stl')) {
-        console.log('Loading STL file...');
-        geometry = await loadSTLFile(file);
-        console.log('STL file loaded successfully');
-      } else {
-        console.log('Using fallback geometry');
-        geometry = new THREE.BoxGeometry(2, 3, 1);
+      const renderer = new THREE.WebGLRenderer({ 
+        antialias: true, 
+        preserveDrawingBuffer: true,
+        alpha: true
+      });
+      renderer.setSize(512, 512);
+      renderer.setClearColor(0x000000, 0);
+      
+      const camera = new THREE.PerspectiveCamera(60, 1.0, 0.1, 1000);
+      
+      const viewImages: string[] = [];
+      const viewInfo: CameraView[] = [];
+
+      for (const view of meshAnalysis.camera_views) {
+        camera.position.set(view.position[0], view.position[1], view.position[2]);
+        camera.lookAt(view.target[0], view.target[1], view.target[2]);
+        camera.up.set(view.up[0], view.up[1], view.up[2]);
+        camera.fov = view.fov;
+        camera.aspect = view.aspect;
+        camera.near = view.near;
+        camera.far = view.far;
+        camera.updateProjectionMatrix();
+
+        renderer.render(scene, camera);
+        
+        const canvas = renderer.domElement;
+        const imageData = canvas.toDataURL('image/png');
+        
+        viewImages.push(imageData);
+        viewInfo.push(view);
       }
 
-      const newModelData: ModelData = {
-        name: file.name, 
-        size: file.size, 
-        type: file.type,
-        uploadedAt: new Date(), 
-        geometry: geometry
+      renderer.dispose();
+
+      console.log(`Captured ${viewImages.length} views, sending to SAM...`);
+
+      const response = await fetch(`${this.baseUrl}/process-multiview-sam`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          view_images: viewImages,
+          view_info: viewInfo,
+          superpoints: meshAnalysis.superpoints
+        }),
+      });
+
+      const result = await response.json();
+
+      if (result.status === 'success') {
+        console.log(`SAM processing complete: ${result.stats.total_masks_generated} masks generated, ${result.stats.total_masks_assigned} assigned`);
+        return result;
+      } else {
+        console.error('SAM processing failed:', result.message);
+        return null;
+      }
+
+    } catch (error) {
+      console.error('Multi-view SAM processing error:', error);
+      return null;
+    }
+  }
+
+  async processAdvancedSAM(scene: THREE.Scene, targetMesh: THREE.Mesh): Promise<{
+    superpoints: SuperPoint[];
+    assignments: SuperPointAssignment[];
+    stats: any;
+  } | null> {
+    try {
+      console.log('Starting advanced SAM processing...');
+
+      const geometry = targetMesh.geometry;
+      const positionAttribute = geometry.getAttribute('position');
+      const indexAttribute = geometry.getIndex();
+
+      if (!positionAttribute || !indexAttribute) {
+        throw new Error('Mesh must have position and index attributes');
+      }
+
+      const vertices = positionAttribute.array as Float32Array;
+      const faces = indexAttribute.array as Uint32Array;
+
+      const meshAnalysis = await this.analyzeMesh(vertices, faces);
+      if (!meshAnalysis) {
+        throw new Error('Mesh analysis failed');
+      }
+
+      const samResult = await this.renderViewsAndProcessSAM(scene, meshAnalysis, targetMesh);
+      if (!samResult) {
+        throw new Error('SAM processing failed');
+      }
+
+      return {
+        superpoints: meshAnalysis.superpoints,
+        assignments: samResult.assignments,
+        stats: {
+          mesh_analysis: meshAnalysis.stats,
+          sam_processing: samResult.stats
+        }
       };
 
-      console.log('Setting model data:', newModelData);
-      setModelData(newModelData);
-      setPaintColors({});
-      
-      // Clear any existing SAM mapping when loading new model
-      clearSAMMapping();
-      setSamMasks([]);
-      setSamGroupsData(null);
-      setUseSAMGroups(false);
-      
-      console.log('Model data set successfully');
-      
     } catch (error) {
-      console.error('Error in handleFileUpload:', error);
-      alert(`Error loading ${file.name}. Showing placeholder instead.`);
-      
-      const fallbackGeometry = new THREE.CylinderGeometry(1, 1, 3, 16);
-      setModelData({
-        name: `${file.name} (placeholder)`, 
-        size: file.size, 
-        type: file.type,
-        uploadedAt: new Date(), 
-        geometry: fallbackGeometry
+      console.error('Advanced SAM processing failed:', error);
+      return null;
+    }
+  }
+
+  async checkHealth(): Promise<boolean> {
+    try {
+      const response = await fetch(`${this.baseUrl}/health`);
+      const result = await response.json();
+      return result.status === 'healthy' && result.sam_loaded;
+    } catch (error) {
+      console.error('Health check failed:', error);
+      return false;
+    }
+  }
+}
+
+// Utility functions
+class SuperPointAssignmentUtils {
+  static createMaskingGroups(assignments: SuperPointAssignment[], superpoints: SuperPoint[]): Map<number, number[]> {
+    const maskingGroups = new Map<number, number[]>();
+    
+    assignments.forEach((assignment, index) => {
+      maskingGroups.set(index, assignment.vertices);
+    });
+
+    return maskingGroups;
+  }
+
+  static convertToVertexColors(assignments: SuperPointAssignment[], totalVertices: number, colors: THREE.Color[] = []): THREE.Color[] {
+    if (colors.length === 0) {
+      colors = new Array(totalVertices).fill(null).map(() => new THREE.Color(0.8, 0.8, 0.8));
+    }
+
+    const assignmentColors = this.generateDistinctColors(assignments.length);
+
+    assignments.forEach((assignment, index) => {
+      const color = assignmentColors[index];
+      assignment.vertices.forEach(vertexIndex => {
+        if (vertexIndex < colors.length) {
+          colors[vertexIndex] = color.clone();
+        }
       });
-      setPaintColors({});
-    } finally {
-      setIsLoading(false);
-      console.log('handleFileUpload completed');
-    }
-  }, []);
+    });
 
-  // No automatic SAM analysis, only manual trigger
-  const handleAnalysisComplete = useCallback((analysisData: any) => {
-    console.log('handleAnalysisComplete called with:', analysisData);
-    setAiAnalysis(analysisData);
-    
-    // Only update masking groups if we get valid AI analysis
-    if (analysisData.success && analysisData.masking_groups) {
-      const aiGroups = Object.entries(analysisData.masking_groups).map(([id, group]: [string, any]) => ({
-        id,
-        name: group.name,
-        color: group.color,
-        visible: true
-      }));
-      setMaskingGroups(aiGroups);
-      console.log('🤖 AI-generated masking groups applied');
-    } else {
-      console.log('🔄 Using fallback masking groups - no automatic SAM analysis');
-    }
-  }, []);
+    return colors;
+  }
 
-  const handleGroupToggle = useCallback((groupId: string) => {
-    const currentGroups = getCurrentMaskingGroups();
+  static generateDistinctColors(count: number): THREE.Color[] {
+    const colors: THREE.Color[] = [];
     
-    if (useSAMGroups) {
-      // Update SAM groups
-      if (samGroupMode === 'individual') {
-        setSamMaskGroups(prev => 
-          prev.map(group => 
-            group.id === groupId ? { ...group, visible: !group.visible } : group
-          )
-        );
-      } else {
-        setSamSemanticGroups(prev => 
-          prev.map(group => 
-            group.id === groupId ? { ...group, visible: !group.visible } : group
-          )
-        );
+    for (let i = 0; i < count; i++) {
+      const hue = (i * 360 / count) % 360;
+      const saturation = 0.7 + (i % 3) * 0.1;
+      const lightness = 0.5 + (i % 2) * 0.2;
+      
+      const color = new THREE.Color();
+      color.setHSL(hue / 360, saturation, lightness);
+      colors.push(color);
+    }
+    
+    return colors;
+  }
+}
+
+interface ModelViewerProps {
+  onColorsChange?: (colors: THREE.Color[]) => void;
+}
+
+interface ProcessingStatus {
+  stage: 'idle' | 'analyzing' | 'rendering' | 'processing' | 'complete' | 'error';
+  message: string;
+  progress?: number;
+}
+
+interface SAMResults {
+  superpoints: SuperPoint[];
+  assignments: SuperPointAssignment[];
+  stats: any;
+}
+
+const App: React.FC = () => {
+  const mountRef = useRef<HTMLDivElement>(null);
+  const sceneRef = useRef<THREE.Scene | null>(null);
+  const rendererRef = useRef<THREE.WebGLRenderer | null>(null);
+  const cameraRef = useRef<THREE.PerspectiveCamera | null>(null);
+  const controlsRef = useRef<any>(null);
+  const meshRef = useRef<THREE.Mesh | null>(null);
+  const samServiceRef = useRef<EnhancedSAMService | null>(null);
+
+  const [file, setFile] = useState<File | null>(null);
+  const [isUploaded, setIsUploaded] = useState(false);
+  const [selectedColor, setSelectedColor] = useState('#ff6b35');
+  const [paintingMode, setPaintingMode] = useState<'individual' | 'semantic'>('semantic');
+  const [currentMaskingGroup, setCurrentMaskingGroup] = useState<number>(0);
+  const [maskingGroups, setMaskingGroups] = useState<Map<number, number[]>>(new Map());
+  const [backgroundType, setBackgroundType] = useState<'studio' | 'transparent' | 'grid'>('studio');
+  const [samInitialized, setSamInitialized] = useState(false);
+  const [processingStatus, setProcessingStatus] = useState<ProcessingStatus>({ 
+    stage: 'idle', 
+    message: 'Ready to process' 
+  });
+  const [samResults, setSamResults] = useState<SAMResults | null>(null);
+  const [showAssignmentStats, setShowAssignmentStats] = useState(false);
+
+  // Initialize Three.js scene
+  useEffect(() => {
+    if (!mountRef.current) return;
+
+    const container = mountRef.current;
+
+    // Scene setup
+    const scene = new THREE.Scene();
+    sceneRef.current = scene;
+
+    // Camera setup - proper initial positioning
+    const camera = new THREE.PerspectiveCamera(75, container.clientWidth / container.clientHeight, 0.1, 1000);
+    camera.position.set(5, 5, 5);
+    camera.lookAt(0, 0, 0);
+    cameraRef.current = camera;
+
+    // Renderer setup - fixed size for the card layout
+    const renderer = new THREE.WebGLRenderer({ 
+      antialias: true, 
+      alpha: backgroundType === 'transparent' 
+    });
+    renderer.setPixelRatio(window.devicePixelRatio);
+    renderer.setSize(700, 556); // Fixed size to match the card
+    renderer.shadowMap.enabled = true;
+    renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+    
+    // Style the canvas properly
+    renderer.domElement.style.display = 'block';
+    renderer.domElement.style.width = '100%';
+    renderer.domElement.style.height = '100%';
+    
+    rendererRef.current = renderer;
+
+    // Lighting setup
+    setupLighting(scene);
+    
+    // Background setup
+    setupBackground(scene, renderer, backgroundType);
+
+    // Improved mouse controls
+    let isDragging = false;
+    let previousMousePosition = { x: 0, y: 0 };
+    const spherical = new THREE.Spherical();
+    const target = new THREE.Vector3(0, 0, 0);
+
+    // Set initial spherical coordinates
+    const cameraOffset = camera.position.clone().sub(target);
+    spherical.setFromVector3(cameraOffset);
+
+    const handleMouseDown = (event: MouseEvent) => {
+      isDragging = true;
+      previousMousePosition = { x: event.clientX, y: event.clientY };
+      event.preventDefault();
+    };
+
+    const handleMouseUp = () => {
+      isDragging = false;
+    };
+
+    const handleMouseMove = (event: MouseEvent) => {
+      if (!isDragging) return;
+      event.preventDefault();
+      
+      const deltaMove = {
+        x: event.clientX - previousMousePosition.x,
+        y: event.clientY - previousMousePosition.y
+      };
+
+      // Update spherical coordinates
+      spherical.theta -= deltaMove.x * 0.01;
+      spherical.phi += deltaMove.y * 0.01;
+      
+      // Constrain phi to avoid flipping
+      spherical.phi = Math.max(0.1, Math.min(Math.PI - 0.1, spherical.phi));
+
+      // Update camera position
+      camera.position.setFromSpherical(spherical).add(target);
+      camera.lookAt(target);
+
+      previousMousePosition = { x: event.clientX, y: event.clientY };
+    };
+
+    const handleWheel = (event: WheelEvent) => {
+      event.preventDefault();
+      
+      // Zoom by adjusting radius
+      spherical.radius += event.deltaY * 0.01;
+      spherical.radius = Math.max(1, Math.min(50, spherical.radius));
+      
+      // Update camera position
+      camera.position.setFromSpherical(spherical).add(target);
+      camera.lookAt(target);
+    };
+
+    // Resize handler - simplified for fixed size
+    const handleResize = () => {
+      // For fixed-size container, just ensure the renderer stays at correct size
+      if (renderer && camera) {
+        camera.aspect = 700 / 556;
+        camera.updateProjectionMatrix();
+        renderer.setSize(700, 556);
       }
-    } else {
-      // Update regular masking groups
-      setMaskingGroups(prev => 
-        prev.map(group => 
-          group.id === groupId ? { ...group, visible: !group.visible } : group
-        )
-      );
-    }
-  }, [useSAMGroups, samGroupMode]);
+    };
 
-  const handleColorSelect = useCallback((color: string) => {
-    setSelectedColor(color);
-    setPaintColors(prev => ({ ...prev, [selectedGroup]: color }));
-  }, [selectedGroup]);
+    // Add event listeners
+    renderer.domElement.addEventListener('mousedown', handleMouseDown);
+    renderer.domElement.addEventListener('mouseup', handleMouseUp);
+    renderer.domElement.addEventListener('mousemove', handleMouseMove);
+    renderer.domElement.addEventListener('wheel', handleWheel, { passive: false });
+    window.addEventListener('mouseup', handleMouseUp);
+
+    // Initial setup
+    handleResize();
+
+    // Mount renderer
+    container.appendChild(renderer.domElement);
+
+    // Animation loop
+    const animate = () => {
+      requestAnimationFrame(animate);
+      renderer.render(scene, camera);
+    };
+    animate();
+
+    // Initialize SAM service
+    initializeSAMService();
+
+    return () => {
+      // Cleanup
+      renderer.domElement.removeEventListener('mousedown', handleMouseDown);
+      renderer.domElement.removeEventListener('mouseup', handleMouseUp);
+      renderer.domElement.removeEventListener('mousemove', handleMouseMove);
+      renderer.domElement.removeEventListener('wheel', handleWheel);
+      window.removeEventListener('mouseup', handleMouseUp);
+      
+      if (container && renderer.domElement && container.contains(renderer.domElement)) {
+        container.removeChild(renderer.domElement);
+      }
+      renderer.dispose();
+    };
+  }, [backgroundType]);
+
+  const initializeSAMService = async () => {
+    try {
+      setProcessingStatus({ stage: 'analyzing', message: 'Initializing SAM service...' });
+      
+      samServiceRef.current = new EnhancedSAMService();
+      const initialized = await samServiceRef.current.initialize();
+      
+      if (initialized) {
+        setSamInitialized(true);
+        setProcessingStatus({ stage: 'idle', message: 'SAM service ready' });
+      } else {
+        throw new Error('SAM initialization failed');
+      }
+    } catch (error) {
+      console.error('SAM initialization error:', error);
+      setSamInitialized(false);
+      setProcessingStatus({ 
+        stage: 'error', 
+        message: 'SAM service initialization failed. Please check backend.' 
+      });
+    }
+  };
+
+  const setupLighting = (scene: THREE.Scene) => {
+    // Much brighter ambient light
+    const ambientLight = new THREE.AmbientLight(0x404040, 1.2);
+    scene.add(ambientLight);
+
+    // Brighter main directional light
+    const directionalLight = new THREE.DirectionalLight(0xffffff, 1.5);
+    directionalLight.position.set(10, 10, 5);
+    directionalLight.castShadow = true;
+    scene.add(directionalLight);
+
+    // Brighter fill lights
+    const fillLight1 = new THREE.DirectionalLight(0xffffff, 0.8);
+    fillLight1.position.set(-10, 0, 5);
+    scene.add(fillLight1);
+
+    const fillLight2 = new THREE.DirectionalLight(0xffffff, 0.6);
+    fillLight2.position.set(0, -10, 5);
+    scene.add(fillLight2);
+
+    // Additional top light for better visibility
+    const topLight = new THREE.DirectionalLight(0xffffff, 0.4);
+    topLight.position.set(0, 20, 0);
+    scene.add(topLight);
+  };
+
+  const setupBackground = (scene: THREE.Scene, renderer: THREE.WebGLRenderer, type: string) => {
+    switch (type) {
+      case 'studio':
+        scene.background = new THREE.Color(0xf5f5f5);
+        renderer.setClearColor(0xf5f5f5, 1);
+        break;
+      case 'transparent':
+        scene.background = null;
+        renderer.setClearColor(0x000000, 0);
+        break;
+      case 'grid':
+        scene.background = new THREE.Color(0xf0f0f0);
+        renderer.setClearColor(0xf0f0f0, 1);
+        break;
+    }
+  };
+
+  const handleFileUpload = useCallback((event: React.ChangeEvent<HTMLInputElement>) => {
+    const uploadedFile = event.target.files?.[0];
+    if (!uploadedFile) return;
+
+    setFile(uploadedFile);
+    setProcessingStatus({ stage: 'analyzing', message: 'Loading STL file...' });
+
+    const reader = new FileReader();
+    reader.onload = (e) => {
+      const arrayBuffer = e.target?.result as ArrayBuffer;
+      
+      // Simple STL parser
+      const dataView = new DataView(arrayBuffer);
+      const triangleCount = dataView.getUint32(80, true);
+      
+      const vertices: number[] = [];
+      const indices: number[] = [];
+      let offset = 84;
+      
+      for (let i = 0; i < triangleCount; i++) {
+        // Skip normal (12 bytes)
+        offset += 12;
+        
+        // Read 3 vertices
+        for (let j = 0; j < 3; j++) {
+          vertices.push(
+            dataView.getFloat32(offset, true),
+            dataView.getFloat32(offset + 4, true),
+            dataView.getFloat32(offset + 8, true)
+          );
+          indices.push(vertices.length / 3 - 1);
+          offset += 12;
+        }
+        
+        offset += 2; // Skip attribute byte count
+      }
+
+      // Create geometry
+      const geometry = new THREE.BufferGeometry();
+      geometry.setAttribute('position', new THREE.Float32BufferAttribute(vertices, 3));
+      geometry.setIndex(indices);
+      geometry.computeVertexNormals();
+
+      // Clear previous mesh
+      if (meshRef.current && sceneRef.current) {
+        sceneRef.current.remove(meshRef.current);
+      }
+
+      // Create new mesh
+      const material = new THREE.MeshPhongMaterial({
+        color: 0xcccccc,
+        vertexColors: true
+      });
+
+      const mesh = new THREE.Mesh(geometry, material);
+      mesh.castShadow = true;
+      mesh.receiveShadow = true;
+
+      // Proper centering and scaling
+      geometry.computeBoundingBox();
+      const bbox = geometry.boundingBox!;
+      const center = bbox.getCenter(new THREE.Vector3());
+      const size = bbox.getSize(new THREE.Vector3());
+      const maxDim = Math.max(size.x, size.y, size.z);
+
+      // Center the geometry
+      geometry.translate(-center.x, -center.y, -center.z);
+
+      // Scale to fit nicely in view (target size of 4 units)
+      const targetSize = 4;
+      const scale = maxDim > 0 ? targetSize / maxDim : 1;
+      geometry.scale(scale, scale, scale);
+
+      // Position mesh at origin
+      mesh.position.set(0, 0, 0);
+
+      meshRef.current = mesh;
+      sceneRef.current?.add(mesh);
+
+      // Reset camera to good viewing position
+      if (cameraRef.current) {
+        const camera = cameraRef.current;
+        camera.position.set(6, 6, 6);
+        camera.lookAt(0, 0, 0);
+        
+        // Update spherical coordinates for controls
+        const spherical = new THREE.Spherical();
+        spherical.setFromVector3(camera.position);
+      }
+
+      // Initialize vertex colors
+      const positionAttribute = geometry.getAttribute('position');
+      const colors = new Float32Array(positionAttribute.count * 3);
+      for (let i = 0; i < colors.length; i += 3) {
+        colors[i] = 0.8;     // R
+        colors[i + 1] = 0.8; // G
+        colors[i + 2] = 0.8; // B
+      }
+      geometry.setAttribute('color', new THREE.BufferAttribute(colors, 3));
+
+      setIsUploaded(true);
+      setProcessingStatus({ stage: 'idle', message: 'Model loaded successfully' });
+    };
+
+    reader.readAsArrayBuffer(uploadedFile);
+  }, []);
+
+  const processAdvancedSAM = async () => {
+    if (!meshRef.current || !sceneRef.current || !samServiceRef.current || !samInitialized) {
+      alert('Please upload a model and ensure SAM is initialized');
+      return;
+    }
+
+    try {
+      setProcessingStatus({ stage: 'analyzing', message: 'Analyzing mesh geometry...' });
+      
+      // Add timeout protection (5 minutes max)
+      const timeoutId = setTimeout(() => {
+        throw new Error('Processing timeout - please try a smaller model');
+      }, 300000);
+      
+      const result = await samServiceRef.current.processAdvancedSAM(
+        sceneRef.current,
+        meshRef.current
+      );
+      
+      // Clear timeout if processing completes
+      clearTimeout(timeoutId);
+
+      if (result) {
+        setSamResults(result);
+        
+        // Convert assignments to masking groups
+        const groups = SuperPointAssignmentUtils.createMaskingGroups(
+          result.assignments,
+          result.superpoints
+        );
+        setMaskingGroups(groups);
+
+        // Apply visual feedback
+        updateVertexColors(result.assignments);
+
+        setProcessingStatus({ 
+          stage: 'complete', 
+          message: `Processing complete! Generated ${result.assignments.length} semantic regions.` 
+        });
+
+        // Show statistics
+        setShowAssignmentStats(true);
+      } else {
+        throw new Error('SAM processing returned no results');
+      }
+    } catch (error) {
+      console.error('Advanced SAM processing failed:', error);
+      if (error instanceof Error && error.message.includes('timeout')) {
+        setProcessingStatus({ 
+          stage: 'error', 
+          message: 'Processing timed out. Try a model with fewer vertices.' 
+        });
+      } else {
+        setProcessingStatus({ 
+          stage: 'error', 
+          message: 'SAM processing failed. Please try again.' 
+        });
+      }
+    }
+  };
+
+  const updateVertexColors = (assignments: SuperPointAssignment[]) => {
+    if (!meshRef.current) return;
+
+    const geometry = meshRef.current.geometry;
+    const positionAttribute = geometry.getAttribute('position');
+    const colorAttribute = geometry.getAttribute('color') as THREE.BufferAttribute;
+
+    if (!colorAttribute) return;
+
+    const colors = SuperPointAssignmentUtils.convertToVertexColors(
+      assignments,
+      positionAttribute.count
+    );
+
+    // Update the existing color array instead of replacing it
+    const existingArray = colorAttribute.array as Float32Array;
+    colors.forEach((color, index) => {
+      existingArray[index * 3] = color.r;
+      existingArray[index * 3 + 1] = color.g;
+      existingArray[index * 3 + 2] = color.b;
+    });
+
+    colorAttribute.needsUpdate = true;
+  };
+
+  const paintCurrentGroup = () => {
+    if (!meshRef.current || maskingGroups.size === 0) return;
+
+    const vertices = maskingGroups.get(currentMaskingGroup);
+    if (!vertices) return;
+
+    const geometry = meshRef.current.geometry;
+    const colorAttribute = geometry.getAttribute('color') as THREE.BufferAttribute;
+    if (!colorAttribute) return;
+
+    const color = new THREE.Color(selectedColor);
+    const colorArray = colorAttribute.array as Float32Array;
+
+    vertices.forEach(vertexIndex => {
+      if (vertexIndex * 3 + 2 < colorArray.length) {
+        colorArray[vertexIndex * 3] = color.r;
+        colorArray[vertexIndex * 3 + 1] = color.g;
+        colorArray[vertexIndex * 3 + 2] = color.b;
+      }
+    });
+
+    colorAttribute.needsUpdate = true;
+  };
+
+  const exportModel = () => {
+    if (!meshRef.current) return;
+
+    const geometry = meshRef.current.geometry;
+    const positionAttribute = geometry.getAttribute('position');
+    const colorAttribute = geometry.getAttribute('color');
+
+    if (!positionAttribute || !colorAttribute) return;
+
+    // Create STL with colors (simplified export)
+    let stlContent = 'solid coloredModel\n';
+    const positions = positionAttribute.array as Float32Array;
+
+    for (let i = 0; i < positions.length; i += 9) {
+      // Calculate face normal
+      const v1 = new THREE.Vector3(positions[i], positions[i + 1], positions[i + 2]);
+      const v2 = new THREE.Vector3(positions[i + 3], positions[i + 4], positions[i + 5]);
+      const v3 = new THREE.Vector3(positions[i + 6], positions[i + 7], positions[i + 8]);
+
+      const normal = new THREE.Vector3()
+        .subVectors(v2, v1)
+        .cross(new THREE.Vector3().subVectors(v3, v1))
+        .normalize();
+
+      stlContent += `  facet normal ${normal.x} ${normal.y} ${normal.z}\n`;
+      stlContent += '    outer loop\n';
+      stlContent += `      vertex ${v1.x} ${v1.y} ${v1.z}\n`;
+      stlContent += `      vertex ${v2.x} ${v2.y} ${v2.z}\n`;
+      stlContent += `      vertex ${v3.x} ${v3.y} ${v3.z}\n`;
+      stlContent += '    endloop\n';
+      stlContent += '  endfacet\n';
+    }
+
+    stlContent += 'endsolid coloredModel\n';
+
+    const blob = new Blob([stlContent], { type: 'text/plain' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = 'painted_model.stl';
+    a.click();
+    URL.revokeObjectURL(url);
+  };
+
+  const getProcessingIcon = () => {
+    switch (processingStatus.stage) {
+      case 'analyzing':
+      case 'rendering':
+      case 'processing':
+        return <RefreshCw className="animate-spin" />;
+      case 'complete':
+        return <CheckCircle className="text-green-500" />;
+      case 'error':
+        return <AlertCircle className="text-red-500" />;
+      default:
+        return <Cpu />;
+    }
+  };
+
+  const getProcessingStatusColor = () => {
+    switch (processingStatus.stage) {
+      case 'analyzing':
+      case 'rendering':
+      case 'processing':
+        return 'text-blue-600';
+      case 'complete':
+        return 'text-green-600';
+      case 'error':
+        return 'text-red-600';
+      default:
+        return 'text-gray-600';
+    }
+  };
 
   return (
-    <div style={{
-      minHeight: '100vh',
-      background: 'linear-gradient(135deg, #E0E7FF 0%, #F3E8FF 50%, #FCE7F3 100%)',
-      padding: '20px'
-    }}>
-      <div style={{ maxWidth: '1200px', margin: '0 auto' }}>
-        <div style={{ textAlign: 'center', marginBottom: '40px' }}>
-          <h1 style={{ 
-            fontSize: '48px', fontWeight: '800', color: '#1F2937', marginBottom: '8px',
-            textShadow: '0 2px 4px rgba(0,0,0,0.1)'
-          }}>
-            3D Miniature Painter
-          </h1>
-          <p style={{ fontSize: '18px', color: '#6B7280', fontWeight: '500' }}>
-            Upload your STL files and paint your 3D miniatures with AI-powered segmentation
-          </p>
+    <div className="flex h-screen bg-gray-50">
+      {/* Left Panel - Controls */}
+      <div className="w-80 bg-white shadow-lg flex flex-col">
+        <div className="p-6 border-b">
+          <h2 className="text-2xl font-bold text-gray-800 mb-4">3D Miniature Painter</h2>
           
-          {/* Backend Status Indicator */}
-          <div style={{ 
-            marginTop: '16px', 
-            display: 'flex', 
-            alignItems: 'center', 
-            justifyContent: 'center', 
-            gap: '8px',
-            fontSize: '14px'
-          }}>
-            {backendStatus === 'connected' && (
-              <React.Fragment>
-                <Brain size={16} style={{ color: '#10B981' }} />
-                <span style={{ color: '#10B981', fontWeight: '600' }}>AI Backend Connected</span>
-              </React.Fragment>
-            )}
-            {backendStatus === 'error' && (
-              <React.Fragment>
-                <Zap size={16} style={{ color: '#F59E0B' }} />
-                <span style={{ color: '#F59E0B', fontWeight: '600' }}>Basic Mode (AI Backend Offline)</span>
-              </React.Fragment>
-            )}
+          {/* File Upload */}
+          <div className="mb-6">
+            <label className="block text-sm font-medium text-gray-700 mb-2">
+              Upload STL Model
+            </label>
+            <div className="relative">
+              <input
+                type="file"
+                accept=".stl"
+                onChange={handleFileUpload}
+                className="absolute inset-0 w-full h-full opacity-0 cursor-pointer"
+              />
+              <div className="flex items-center justify-center p-4 border-2 border-dashed border-gray-300 rounded-lg hover:border-blue-400 transition-colors">
+                <Upload className="w-6 h-6 text-gray-400 mr-2" />
+                <span className="text-gray-600">
+                  {file ? file.name : 'Choose STL file'}
+                </span>
+              </div>
+            </div>
           </div>
-          
-          <div style={{ marginTop: '20px', fontSize: '14px', color: '#6B7280' }}>
-            Mouse: Orbit camera around model • Scroll: Zoom in/out
+
+          {/* SAM Processing Status */}
+          <div className="mb-6 p-4 bg-gray-50 rounded-lg">
+            <div className="flex items-center justify-between mb-2">
+              <span className="text-sm font-medium text-gray-700">SAM Status</span>
+              <div className={`w-3 h-3 rounded-full ${samInitialized ? 'bg-green-500' : 'bg-red-500'}`} />
+            </div>
+            <div className={`flex items-center text-sm ${getProcessingStatusColor()}`}>
+              {getProcessingIcon()}
+              <span className="ml-2">{processingStatus.message}</span>
+            </div>
           </div>
+
+          {/* Advanced SAM Processing */}
+          <button
+            onClick={processAdvancedSAM}
+            disabled={!isUploaded || !samInitialized || processingStatus.stage !== 'idle'}
+            className="w-full flex items-center justify-center px-4 py-3 bg-gradient-to-r from-purple-600 to-blue-600 text-white rounded-lg hover:from-purple-700 hover:to-blue-700 disabled:opacity-50 disabled:cursor-not-allowed transition-all"
+          >
+            <Bot className="w-5 h-5 mr-2" />
+            Process with Advanced SAM
+          </button>
         </div>
 
-        <div style={{ display: 'flex', justifyContent: 'center', marginBottom: '40px' }}>
-          <FileUpload 
-            onFileUpload={handleFileUpload} 
-            onAnalysisComplete={handleAnalysisComplete}
-            isLoading={isLoading} 
-          />
-        </div>
+        {/* Painting Controls */}
+        <div className="flex-1 p-6 space-y-6 overflow-y-auto">
+          {/* Color Picker */}
+          <div>
+            <label className="block text-sm font-medium text-gray-700 mb-2">
+              Paint Color
+            </label>
+            <div className="flex items-center space-x-3">
+              <input
+                type="color"
+                value={selectedColor}
+                onChange={(e) => setSelectedColor(e.target.value)}
+                className="w-12 h-12 rounded-lg border border-gray-300 cursor-pointer"
+              />
+              <input
+                type="text"
+                value={selectedColor}
+                onChange={(e) => setSelectedColor(e.target.value)}
+                className="flex-1 px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+              />
+            </div>
+          </div>
 
-        {modelData ? (
-          <div style={{ display: 'grid', gridTemplateColumns: '2fr 1fr', gap: '32px' }}>
+          {/* Masking Groups */}
+          {maskingGroups.size > 0 && (
             <div>
-              <div style={{
-                background: 'white', borderRadius: '16px', padding: '24px',
-                boxShadow: '0 20px 25px -5px rgba(0, 0, 0, 0.1)', marginBottom: '20px'
-              }}>
-                <h2 style={{ fontSize: '24px', fontWeight: '700', color: '#1F2937', marginBottom: '20px' }}>
-                  3D Preview: {modelData.name}
-                  {aiAnalysis?.success && (
-                    <span style={{ 
-                      marginLeft: '12px', 
-                      fontSize: '14px', 
-                      color: '#10B981', 
-                      fontWeight: '500',
-                      padding: '4px 8px',
-                      backgroundColor: '#ECFDF5',
-                      borderRadius: '4px'
-                    }}>
-                      AI Enhanced
+              <label className="block text-sm font-medium text-gray-700 mb-2">
+                Masking Groups ({maskingGroups.size})
+              </label>
+              <div className="space-y-2 max-h-60 overflow-y-auto">
+                {Array.from(maskingGroups.entries()).map(([groupId, vertices]) => (
+                  <button
+                    key={groupId}
+                    onClick={() => setCurrentMaskingGroup(groupId)}
+                    className={`w-full flex items-center justify-between p-3 rounded-lg border-2 transition-all ${
+                      currentMaskingGroup === groupId
+                        ? 'border-blue-500 bg-blue-50'
+                        : 'border-gray-200 bg-white hover:border-gray-300'
+                    }`}
+                  >
+                    <div className="flex items-center">
+                      <Layers className="w-4 h-4 mr-2 text-gray-500" />
+                      <span className="text-sm font-medium">Group {groupId}</span>
+                    </div>
+                    <span className="text-xs text-gray-500">
+                      {vertices.length} vertices
                     </span>
-                  )}
-                </h2>
-                
-                <ThreeScene 
-                  paintColors={paintColors} 
-                  maskingGroups={getCurrentMaskingGroups()} 
-                  modelData={modelData} 
-                  backgroundColor={backgroundColor}
-                  selectedGroup={selectedGroup}
-                  aiAnalysis={aiAnalysis}
-                  onRefsReady={handleRefsReady}
-                />
+                  </button>
+                ))}
               </div>
+              
+              <button
+                onClick={paintCurrentGroup}
+                disabled={maskingGroups.size === 0}
+                className="w-full mt-3 flex items-center justify-center px-4 py-2 bg-orange-500 text-white rounded-lg hover:bg-orange-600 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+              >
+                <Palette className="w-4 h-4 mr-2" />
+                Paint Selected Group
+              </button>
             </div>
+          )}
 
-            <div>
-              {/* Enhanced Masking Panel with SAM Toggle */}
-              <div style={{
-                background: 'white', borderRadius: '16px', padding: '24px',
-                boxShadow: '0 20px 25px -5px rgba(0, 0, 0, 0.1)', marginBottom: '20px'
-              }}>
-                <div style={{ marginBottom: '16px' }}>
-                  <h3 style={{ fontSize: '18px', fontWeight: '700', color: '#1F2937', marginBottom: '12px' }}>
-                    Masking Groups
-                  </h3>
-                  
-                  {/* Enhanced SAM Toggle with 3D mapping status */}
-                  {samMasks.length > 0 && (
-                    <div style={{ marginBottom: '16px', padding: '12px', backgroundColor: '#F3F4F6', borderRadius: '8px' }}>
-                      <div style={{ display: 'flex', alignItems: 'center', gap: '12px', marginBottom: '8px' }}>
-                        <button
-                          onClick={handleSAMToggle}
-                          style={{
-                            padding: '6px 12px',
-                            background: useSAMGroups ? '#10B981' : '#6B7280',
-                            color: 'white',
-                            borderRadius: '4px',
-                            border: 'none',
-                            cursor: 'pointer',
-                            fontSize: '12px',
-                            fontWeight: '600'
-                          }}
-                        >
-                          {useSAMGroups ? '🤖 SAM Groups' : '📐 Geometric Groups'}
-                        </button>
-                        
-                        <span style={{ fontSize: '12px', color: '#6B7280' }}>
-                          {useSAMGroups 
-                            ? `${samGroupMode === 'individual' ? samMaskGroups.length : samSemanticGroups.length} AI-detected regions` 
-                            : `${maskingGroups.length} geometric regions`}
-                        </span>
-                      </div>
-                      
-                      {/* SAM Group Mode Toggle with enhanced info */}
-                      {useSAMGroups && (
-                        <div style={{ display: 'flex', gap: '8px' }}>
-                          <button
-                            onClick={() => setSamGroupMode('individual')}
-                            style={{
-                              padding: '4px 8px',
-                              background: samGroupMode === 'individual' ? '#3B82F6' : '#E5E7EB',
-                              color: samGroupMode === 'individual' ? 'white' : '#6B7280',
-                              borderRadius: '4px',
-                              border: 'none',
-                              cursor: 'pointer',
-                              fontSize: '11px'
-                            }}
-                          >
-                            Individual ({samMaskGroups.length})
-                          </button>
-                          <button
-                            onClick={() => setSamGroupMode('semantic')}
-                            style={{
-                              padding: '4px 8px',
-                              background: samGroupMode === 'semantic' ? '#3B82F6' : '#E5E7EB',
-                              color: samGroupMode === 'semantic' ? 'white' : '#6B7280',
-                              borderRadius: '4px',
-                              border: 'none',
-                              cursor: 'pointer',
-                              fontSize: '11px'
-                            }}
-                          >
-                            Semantic ({samSemanticGroups.length})
-                          </button>
-                        </div>
-                      )}
-                      
-                      {/* NEW: 3D Mapping Status */}
-                      <div style={{ marginTop: '8px', fontSize: '10px', color: '#6B7280' }}>
-                        3D Mapping: {meshRef.current && cameraRef.current && rendererRef.current 
-                          ? '✅ Ready' 
-                          : '⏳ Initializing...'
-                        }
-                      </div>
-                    </div>
-                  )}
-                </div>
-                
-                <MaskingPanel
-                  groups={getCurrentMaskingGroups()} 
-                  onGroupToggle={handleGroupToggle}
-                  selectedGroup={selectedGroup} 
-                  onGroupSelect={setSelectedGroup}
-                />
-              </div>
-
-              <div style={{
-                background: 'white', borderRadius: '16px', padding: '24px',
-                boxShadow: '0 20px 25px -5px rgba(0, 0, 0, 0.1)', marginBottom: '20px'
-              }}>
-                <BackgroundPicker
-                  selectedBackground={backgroundColor}
-                  onBackgroundSelect={setBackgroundColor}
-                />
-              </div>
-
-              <div style={{
-                background: 'white', borderRadius: '16px', padding: '24px',
-                boxShadow: '0 20px 25px -5px rgba(0, 0, 0, 0.1)', marginBottom: '20px'
-              }}>
-                <ColorPicker
-                  colors={PAINT_COLORS} 
-                  selectedColor={selectedColor}
-                  onColorSelect={handleColorSelect}
-                  title={`Paint ${getCurrentMaskingGroups().find(g => g.id === selectedGroup)?.name || 'Selected Group'}`}
-                />
-              </div>
-
-              {/* Enhanced SAM Test Section */}
-              {modelData && (
-                <div style={{
-                  background: 'white', borderRadius: '16px', padding: '24px',
-                  boxShadow: '0 20px 25px -5px rgba(0, 0, 0, 0.1)', marginBottom: '20px'
-                }}>
-                  <h3 style={{ fontSize: '18px', fontWeight: '700', color: '#1F2937', marginBottom: '16px' }}>
-                    🎯 SAM Segmentation with 3D Mapping
-                  </h3>
-                  <div style={{ display: 'flex', gap: '12px', flexDirection: 'column' }}>
-                    <button
-                      onClick={async () => {
-                        console.log('🚀 Real SAM Analysis with 3D mapping...');
-                        
-                        try {
-                          // Check scene readiness
-                          if (!meshRef.current || !cameraRef.current || !rendererRef.current) {
-                            console.log('⚠️ Scene not ready, triggering capture anyway...');
-                          } else {
-                            console.log('✅ Scene ready for 3D mapping');
-                          }
-                          
-                          // Check backend first
-                          const healthResponse = await fetch('http://localhost:5000/health');
-                          if (!healthResponse.ok) {
-                            throw new Error('Backend not available');
-                          }
-                          
-                          console.log('📤 Backend available, triggering SAM capture...');
-                          
-                          // Use the SAM capture function
-                          if ((window as any).testSAMCapture) {
-                            console.log('📸 Triggering enhanced SAM capture with 3D mapping...');
-                            (window as any).testSAMCapture();
-                          } else {
-                            console.log('❌ SAM capture function not available');
-                            
-                            // Fallback: create enhanced mock results
-                            const mockSamResults = {
-                              masks: [
-                                { mask_id: 0, area: 2400, stability_score: 0.95, pixel_coords: [[100,200], [101,200]], bbox: [90, 190, 50, 50] },
-                                { mask_id: 1, area: 1800, stability_score: 0.91, pixel_coords: [[200,300], [201,300]], bbox: [190, 290, 40, 40] },
-                                { mask_id: 2, area: 1500, stability_score: 0.88, pixel_coords: [[300,400], [301,400]], bbox: [290, 390, 35, 35] },
-                                { mask_id: 3, area: 1200, stability_score: 0.85, pixel_coords: [[400,500], [401,500]], bbox: [390, 490, 30, 30] },
-                                { mask_id: 4, area: 900, stability_score: 0.82, pixel_coords: [[500,600], [501,600]], bbox: [490, 590, 25, 25] }
-                              ],
-                              viewport_size: { width: 1024, height: 1024 },
-                              camera_data: {
-                                camera_matrix: cameraRef.current?.matrixWorld.toArray() || Array(16).fill(0),
-                                projection_matrix: cameraRef.current?.projectionMatrix.toArray() || Array(16).fill(0)
-                              }
-                            };
-                            
-                            if ((window as any).onSAMResults) {
-                              (window as any).onSAMResults(mockSamResults);
-                              console.log('✅ Enhanced mock SAM results with camera data sent');
-                            }
-                          }
-                          
-                        } catch (error) {
-                          console.error('❌ SAM analysis error:', error);
-                          alert(`SAM Analysis Failed: ${error instanceof Error ? error.message : 'Unknown error'}`);
-                        }
-                      }}
-                      style={{
-                        padding: '12px 24px',
-                        background: 'linear-gradient(to right, #10B981, #059669)',
-                        color: 'white',
-                        borderRadius: '8px',
-                        border: 'none',
-                        cursor: 'pointer',
-                        fontSize: '14px',
-                        fontWeight: '600'
-                      }}
-                    >
-                      🎯 Run SAM Segmentation (3D Mapping)
-                    </button>
-                    
-                    <button
-                      onClick={() => {
-                        console.log('🎨 Quick color test with 3D mapping...');
-                        
-                        const quickTestResults = {
-                          masks: [
-                            { mask_id: 0, area: 1500, stability_score: 0.99, pixel_coords: [[200,200], [201,201]], bbox: [190, 190, 20, 20] },
-                            { mask_id: 1, area: 1200, stability_score: 0.92, pixel_coords: [[400,400], [401,401]], bbox: [390, 390, 20, 20] },
-                            { mask_id: 2, area: 900, stability_score: 0.88, pixel_coords: [[600,600], [601,601]], bbox: [590, 590, 20, 20] },
-                            { mask_id: 3, area: 600, stability_score: 0.85, pixel_coords: [[300,700], [301,701]], bbox: [290, 690, 20, 20] },
-                            { mask_id: 4, area: 400, stability_score: 0.82, pixel_coords: [[500,300], [501,301]], bbox: [490, 290, 20, 20] }
-                          ],
-                          viewport_size: { width: 1024, height: 1024 },
-                          camera_data: {
-                            camera_matrix: cameraRef.current?.matrixWorld.toArray() || Array(16).fill(0),
-                            projection_matrix: cameraRef.current?.projectionMatrix.toArray() || Array(16).fill(0)
-                          }
-                        };
-                        
-                        if ((window as any).onSAMResults) {
-                          (window as any).onSAMResults(quickTestResults);
-                          console.log('✅ Quick test with 3D mapping data sent');
-                        }
-                      }}
-                      style={{
-                        padding: '8px 16px',
-                        background: 'linear-gradient(to right, #8B5CF6, #7C3AED)',
-                        color: 'white',
-                        borderRadius: '6px',
-                        border: 'none',
-                        cursor: 'pointer',
-                        fontSize: '12px',
-                        fontWeight: '500'
-                      }}
-                    >
-                      🎨 Quick Test (5 Regions with 3D)
-                    </button>
-                    
-                      
-
-                    <button
-                      onClick={async () => {
-                        console.log('🧪 Backend connection test...');
-                        try {
-                          const response = await fetch('http://localhost:5000/health');
-                          if (response.ok) {
-                            const result = await response.json();
-                            console.log('✅ Backend health check:', result);
-                            alert(`Backend Status: ${result.status}\nSAM Loaded: ${result.sam_loaded}\nDevice: ${result.device}`);
-                          } else {
-                            console.error('❌ Backend health check failed:', response.statusText);
-                            alert('Backend connection failed');
-                          }
-                        } catch (error) {
-                          console.error('❌ Backend connection error:', error);
-                          alert('Backend not available');
-                        }
-                      }}
-                      style={{
-                        padding: '8px 16px',
-                        background: 'linear-gradient(to right, #3B82F6, #1D4ED8)',
-                        color: 'white',
-                        borderRadius: '6px',
-                        border: 'none',
-                        cursor: 'pointer',
-                        fontSize: '12px',
-                        fontWeight: '500'
-                      }}
-                    >
-                      Test Backend Connection
-                    </button>
-                  </div>
-                  <div style={{ fontSize: '12px', color: '#6B7280', marginTop: '8px', lineHeight: '1.4' }}>
-                    <div style={{ marginBottom: '4px' }}>
-                      <strong>🎯 Enhanced SAM:</strong> Real pixel-to-vertex mapping with camera projection
-                    </div>
-                    <div style={{ marginBottom: '4px' }}>
-                      <strong>🎨 Quick Test:</strong> Mock SAM data with 3D mapping simulation
-                    </div>
-                    <div>
-                      <strong>Status:</strong> Scene {meshRef.current && cameraRef.current && rendererRef.current ? '✅ Ready' : '⏳ Loading'} for 3D mapping
-                    </div>
-                  </div>
-                </div>
-              )}
-
-              <ModelInfo modelData={modelData} />
-
-              {/* AI Analysis Info */}
-              {aiAnalysis && (
-                <div style={{
-                  background: 'white', borderRadius: '16px', padding: '24px',
-                  boxShadow: '0 20px 25px -5px rgba(0, 0, 0, 0.1)', marginTop: '20px'
-                }}>
-                  <h3 style={{ fontSize: '18px', fontWeight: '700', color: '#1F2937', marginBottom: '16px' }}>
-                    AI Analysis
-                  </h3>
-                  <div style={{ fontSize: '14px', color: '#4B5563', lineHeight: '1.6' }}>
-                    {aiAnalysis.success ? (
-                      <React.Fragment>
-                        <div><strong>Status:</strong> ✅ Analysis Complete</div>
-                        {aiAnalysis.mesh_info && (
-                          <React.Fragment>
-                            <div><strong>Vertices:</strong> {aiAnalysis.mesh_info.vertices?.toLocaleString()}</div>
-                            <div><strong>Faces:</strong> {aiAnalysis.mesh_info.faces?.toLocaleString()}</div>
-                            <div><strong>Volume:</strong> {aiAnalysis.mesh_info.volume?.toFixed(2)} units³</div>
-                          </React.Fragment>
-                        )}
-                      </React.Fragment>
-                    ) : (
-                      <div><strong>Status:</strong> ⚠️ Using fallback mode</div>
-                    )}
-                  </div>
-                </div>
-              )}
-
-              {/* Enhanced SAM Results Info with 3D mapping status */}
-              {samMasks.length > 0 && (
-                <div style={{
-                  background: 'white', borderRadius: '16px', padding: '24px',
-                  boxShadow: '0 20px 25px -5px rgba(0, 0, 0, 0.1)', marginTop: '20px'
-                }}>
-                  <h3 style={{ fontSize: '18px', fontWeight: '700', color: '#1F2937', marginBottom: '16px' }}>
-                    🎭 SAM Analysis Results with 3D Mapping
-                  </h3>
-                  <div style={{ fontSize: '14px', color: '#4B5563', lineHeight: '1.6' }}>
-                    <div><strong>Status:</strong> ✅ SAM Segmentation Complete</div>
-                    <div><strong>Detected Regions:</strong> {samMasks.length}</div>
-                    <div><strong>Individual Groups:</strong> {samMaskGroups.length}</div>
-                    <div><strong>Largest Region:</strong> {Math.max(...samMasks.map(m => m.area)).toLocaleString()} pixels</div>
-                    <div><strong>Average Confidence:</strong> {(samMasks.reduce((sum, m) => sum + m.stability_score, 0) / samMasks.length).toFixed(3)}</div>
-                    
-                    {/* NEW: 3D Mapping Status */}
-                    <div style={{ marginTop: '8px', paddingTop: '8px', borderTop: '1px solid #E5E7EB' }}>
-                      <div><strong>3D Mapping:</strong> {useSAMGroups ? '🎭 Active' : '📐 Geometric Mode'}</div>
-                      <div><strong>Scene Ready:</strong> {meshRef.current && cameraRef.current && rendererRef.current ? '✅ Yes' : '⏳ Initializing'}</div>
-                      {useSAMGroups && (
-                        <div style={{ fontSize: '12px', color: '#059669', marginTop: '4px' }}>
-                          Expected: All {samMaskGroups.length} regions should have &gt;0 vertices assigned
-                        </div>
-                      )}
-                    </div>
-                  </div>
-                </div>
-              )}
+          {/* Background Options */}
+          <div>
+            <label className="block text-sm font-medium text-gray-700 mb-2">
+              Background
+            </label>
+            <div className="grid grid-cols-3 gap-2">
+              {[
+                { type: 'studio', label: 'Studio' },
+                { type: 'transparent', label: 'Clear' },
+                { type: 'grid', label: 'Grid' }
+              ].map(({ type, label }) => (
+                <button
+                  key={type}
+                  onClick={() => setBackgroundType(type as any)}
+                  className={`px-3 py-2 text-sm rounded-lg border transition-colors ${
+                    backgroundType === type
+                      ? 'border-blue-500 bg-blue-50 text-blue-700'
+                      : 'border-gray-200 bg-white text-gray-700 hover:bg-gray-50'
+                  }`}
+                >
+                  {label}
+                </button>
+              ))}
             </div>
           </div>
-        ) : (
-          <div style={{ textAlign: 'center', paddingTop: '60px' }}>
-            <div style={{
-              background: 'white', borderRadius: '16px', padding: '48px',
-              boxShadow: '0 20px 25px -5px rgba(0, 0, 0, 0.1)', maxWidth: '500px', margin: '0 auto'
-            }}>
-              <div style={{ color: '#9CA3AF', marginBottom: '16px' }}>
-                <Upload size={64} style={{ margin: '0 auto' }} />
-              </div>
-              <h3 style={{ fontSize: '24px', fontWeight: '700', color: '#374151', marginBottom: '8px' }}>
-                No Model Uploaded
-              </h3>
-              <p style={{ color: '#6B7280', fontSize: '16px', marginBottom: '16px' }}>
-                Upload an STL file to start painting your miniature
-                {backendStatus === 'connected' && (
-                  <span style={{ display: 'block', marginTop: '8px', color: '#10B981', fontWeight: '500' }}>
-                    🤖 AI-powered 3D segmentation ready!
-                  </span>
-                )}
-              </p>
-            </div>
+        </div>
+
+        {/* Bottom Actions */}
+        <div className="p-6 border-t space-y-3">
+          <button
+            onClick={exportModel}
+            disabled={!isUploaded}
+            className="w-full flex items-center justify-center px-4 py-2 bg-green-600 text-white rounded-lg hover:bg-green-700 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+          >
+            <Download className="w-4 h-4 mr-2" />
+            Export Painted Model
+          </button>
+        </div>
+      </div>
+
+      {/* Right Panel - 3D Viewport */}
+      <div className="flex-1 flex items-center justify-center bg-gray-100 p-8">
+        <div className="bg-white rounded-lg shadow-lg overflow-hidden" style={{ width: '700px', height: '600px' }}>
+          <div className="p-4 border-b bg-gray-50">
+            <h3 className="text-lg font-semibold text-gray-800">3D Model Viewer</h3>
+            <p className="text-sm text-gray-600">Drag to rotate • Scroll to zoom</p>
           </div>
-        )}
+          <div className="relative bg-gray-200" style={{ width: '700px', height: '556px' }}>
+            <div 
+              ref={mountRef} 
+              className="w-full h-full"
+              style={{ width: '700px', height: '556px' }}
+            />
+            
+            {/* Stats Overlay */}
+            {showAssignmentStats && samResults && (
+              <div className="absolute top-4 right-4 bg-white/90 backdrop-blur rounded-lg p-4 shadow-lg">
+                <div className="flex items-center justify-between mb-2">
+                  <h3 className="font-semibold text-gray-800">SAM Analysis Results</h3>
+                  <button
+                    onClick={() => setShowAssignmentStats(false)}
+                    className="text-gray-500 hover:text-gray-700"
+                  >
+                    ×
+                  </button>
+                </div>
+                <div className="space-y-1 text-sm text-gray-600">
+                  <div>Superpoints: {samResults.superpoints.length}</div>
+                  <div>Semantic Groups: {samResults.assignments.length}</div>
+                  <div>Views Processed: {samResults.stats.sam_processing.total_views_processed}</div>
+                  <div>Masks Generated: {samResults.stats.sam_processing.total_masks_generated}</div>
+                  <div>Assignment Efficiency: {(samResults.stats.sam_processing.assignment_efficiency * 100).toFixed(1)}%</div>
+                </div>
+              </div>
+            )}
+          </div>
+        </div>
       </div>
     </div>
   );

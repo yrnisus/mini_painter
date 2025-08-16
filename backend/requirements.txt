@@ -1,12 +1,49 @@
-numpy>=1.21.0
-opencv-python>=4.5.0
-Pillow>=8.3.0
-flask>=2.0.0
-flask-cors>=3.0.0
+# backend/requirements.txt - Enhanced SAM Backend Requirements
+
+# Core SAM dependencies
+segment-anything==1.0
 torch>=1.9.0
 torchvision>=0.10.0
-trimesh>=3.9.0
-matplotlib>=3.5.0
-scikit-image>=0.18.0
+opencv-python>=4.5.0
+
+# Web framework
+flask>=2.3.0
+flask-cors>=4.0.0
+
+# Scientific computing
+numpy>=1.21.0
+scipy>=1.7.0
 scikit-learn>=1.0.0
-segment-anything @ git+https://github.com/facebookresearch/segment-anything.git
+scikit-image>=0.19.0
+
+# Image processing
+Pillow>=8.3.0
+imageio>=2.19.0
+
+# Graph processing
+networkx>=2.6.0
+
+# 3D processing
+open3d>=0.15.0
+trimesh>=3.12.0
+
+# Data handling
+pandas>=1.3.0
+
+# Development tools (optional)
+pytest>=6.2.0
+
+# Additional ML/CV tools
+matplotlib>=3.4.0
+
+# Memory optimization for large meshes
+psutil>=5.8.0
+
+# Installation notes:
+# 1. Create virtual environment: python -m venv venv
+# 2. Activate environment:
+#    - Windows: venv\Scripts\activate
+#    - macOS/Linux: source venv/bin/activate
+# 3. Install requirements: pip install -r requirements.txt
+# 4. Download SAM checkpoint: python sam_model_downloader.py
+# 5. Run the backend: python app.py
