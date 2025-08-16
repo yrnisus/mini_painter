@@ -15,6 +15,8 @@ interface ThreeSceneProps {
   backgroundColor: number;
   selectedGroup: string;
   aiAnalysis?: AIAnalysis;
+  // NEW: Callback to pass refs back to parent component for SAM integration
+  onRefsReady?: (mesh: THREE.Mesh | null, camera: THREE.PerspectiveCamera | null, renderer: THREE.WebGLRenderer | null) => void;
 }
 
 const ThreeScene: React.FC<ThreeSceneProps> = ({ 
@@ -23,7 +25,8 @@ const ThreeScene: React.FC<ThreeSceneProps> = ({
   modelData, 
   backgroundColor,
   selectedGroup,
-  aiAnalysis
+  aiAnalysis,
+  onRefsReady // NEW: Ref callback prop
 }) => {
   // DOM reference
   const mountRef = useRef<HTMLDivElement>(null);
@@ -48,7 +51,7 @@ const ThreeScene: React.FC<ThreeSceneProps> = ({
     animationIdRef
   };
 
-  // Scene initialization - UPDATED to ensure refs are properly set
+  // Scene initialization
   useEffect(() => {
     if (!mountRef.current) return;
 
@@ -62,20 +65,33 @@ const ThreeScene: React.FC<ThreeSceneProps> = ({
 
     // Verify refs are set after initialization
     setTimeout(() => {
-      console.log('🔍 Scene refs check:', {
+      console.log('🔍 Scene refs check after initialization:', {
         scene: !!sceneRef.current,
         camera: !!cameraRef.current,
         renderer: !!rendererRef.current,
         mesh: !!meshRef.current
       });
+      
+      // NEW: Notify parent that basic scene is ready (without mesh yet)
+      if (onRefsReady && cameraRef.current && rendererRef.current) {
+        console.log('🔗 Basic scene ready - notifying parent (mesh will come later)');
+        onRefsReady(meshRef.current, cameraRef.current, rendererRef.current);
+      }
     }, 100);
 
     return cleanup;
-  }, []);
+  }, [onRefsReady]);
 
-  // Setup SAM test functions - MOVED after scene initialization
+  // NEW: Enhanced effect to notify parent when refs are ready
   useEffect(() => {
-    // Wait for scene to be ready before setting up SAM functions
+    if (onRefsReady && sceneRef.current && cameraRef.current && rendererRef.current) {
+      console.log('🔗 Scene fully ready - notifying parent with current refs');
+      onRefsReady(meshRef.current, cameraRef.current, rendererRef.current);
+    }
+  }, [modelData, onRefsReady]); // Trigger when model changes or callback changes
+
+  // Setup SAM test functions when scene is ready
+  useEffect(() => {
     const setupSAMWhenReady = () => {
       if (sceneRef.current && cameraRef.current && rendererRef.current) {
         console.log('🔧 Setting up SAM test functions - scene is ready');
@@ -117,7 +133,7 @@ const ThreeScene: React.FC<ThreeSceneProps> = ({
     updateBackgroundColor(sceneRef.current, rendererRef.current, backgroundColor);
   }, [backgroundColor]);
 
-  // Model loading and processing
+  // ENHANCED: Model loading with ref notification
   useEffect(() => {
     if (!modelData?.geometry || !sceneRef.current) return;
     
@@ -144,9 +160,13 @@ const ThreeScene: React.FC<ThreeSceneProps> = ({
       orbitCenterRef.current = orbitCenter;
 
       console.log('✅ Model loaded successfully');
-      
-      // Verify mesh is properly set
       console.log('🔍 Mesh ref updated:', !!meshRef.current);
+      
+      // NEW: Notify parent that mesh is now ready for 3D mapping
+      if (onRefsReady && cameraRef.current && rendererRef.current) {
+        console.log('🔗 Mesh loaded - notifying parent with updated refs for SAM integration');
+        onRefsReady(meshRef.current, cameraRef.current, rendererRef.current);
+      }
 
       // Force a render
       if (rendererRef.current && cameraRef.current && sceneRef.current) {
@@ -155,7 +175,7 @@ const ThreeScene: React.FC<ThreeSceneProps> = ({
     } catch (error) {
       console.error('❌ Error loading model:', error);
     }
-  }, [modelData, maskingGroups, aiAnalysis]);
+  }, [modelData, maskingGroups, aiAnalysis, onRefsReady]); // Include onRefsReady in dependencies
   
   // Update vertex colors when paint colors or masking groups change
   useEffect(() => {
@@ -175,6 +195,18 @@ const ThreeScene: React.FC<ThreeSceneProps> = ({
       }
     }
   }, [paintColors, maskingGroups]);
+
+  // NEW: Debug effect to track ref changes
+  useEffect(() => {
+    console.log('🔍 ThreeScene ref status update:', {
+      scene: !!sceneRef.current,
+      camera: !!cameraRef.current,
+      renderer: !!rendererRef.current,
+      mesh: !!meshRef.current,
+      modelLoaded: !!modelData,
+      onRefsReady: !!onRefsReady
+    });
+  }, [sceneRef.current, cameraRef.current, rendererRef.current, meshRef.current, modelData, onRefsReady]);
 
   // Component render
   return (

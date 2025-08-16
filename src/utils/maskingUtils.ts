@@ -1,5 +1,6 @@
 import * as THREE from 'three';
 import { MaskingGroup, PaintColors } from '../types';
+import { SAMToVertexMapping, SAMViewData } from './samTo3DMapper';
 
 export interface VertexMasking {
   [groupId: string]: number[];
@@ -19,8 +20,38 @@ export interface AIAnalysis {
   };
 }
 
+// Store SAM mapping globally when available
+let globalSAMMapping: SAMToVertexMapping | null = null;
+let globalSAMViewData: SAMViewData | null = null;
+
 /**
- * Creates geometric masking based on mesh properties and AI analysis
+ * Sets SAM mapping data for use in vertex masking
+ */
+export const setSAMMapping = (
+  samMapping: SAMToVertexMapping, 
+  viewData: SAMViewData
+): void => {
+  console.log('🎭 Setting global SAM mapping...');
+  globalSAMMapping = samMapping;
+  globalSAMViewData = viewData;
+  
+  const groupCount = Object.keys(samMapping).length;
+  const totalVertices = Object.values(samMapping).reduce((sum, vertices) => sum + vertices.length, 0);
+  console.log(`SAM mapping set: ${groupCount} groups, ${totalVertices} vertex assignments`);
+};
+
+/**
+ * Clears SAM mapping (when switching back to geometric mode)
+ */
+export const clearSAMMapping = (): void => {
+  console.log('🔄 Clearing SAM mapping - switching to geometric mode');
+  globalSAMMapping = null;
+  globalSAMViewData = null;
+};
+
+/**
+ * Creates masking with SAM integration
+ * Uses SAM pixel-to-vertex mapping when available, falls back to geometric
  */
 export const createGeometricMasking = (
   geometry: THREE.BufferGeometry,
@@ -29,6 +60,20 @@ export const createGeometricMasking = (
 ): VertexMasking => {
   const positions = geometry.attributes.position;
   const vertexCount = positions.count;
+  
+  console.log(`🎯 Creating masking for ${vertexCount} vertices`);
+  console.log(`SAM mapping available: ${!!globalSAMMapping}`);
+  console.log(`Masking groups: ${maskingGroups.map(g => g.id).join(', ')}`);
+  
+  // Use SAM mapping if available and groups match
+  if (globalSAMMapping && usesSAMGroups(maskingGroups)) {
+    console.log('🎭 Using SAM-based vertex mapping');
+    return createSAMBasedMasking(globalSAMMapping, maskingGroups, vertexCount);
+  }
+  
+  // Original geometric masking logic
+  console.log('📐 Using geometric-based vertex mapping');
+  
   const masking: VertexMasking = {};
   
   // Initialize masking groups
@@ -42,7 +87,6 @@ export const createGeometricMasking = (
   const size = bbox.getSize(new THREE.Vector3());
   const center = bbox.getCenter(new THREE.Vector3());
   
-  console.log(`Creating masking for ${vertexCount} vertices`);
   console.log(`Bounding box: min=${bbox.min.toArray()}, max=${bbox.max.toArray()}`);
   console.log(`Size: ${size.toArray()}, Center: ${center.toArray()}`);
   
@@ -71,6 +115,63 @@ export const createGeometricMasking = (
 };
 
 /**
+ * Creates SAM-based masking using real pixel-to-vertex mapping
+ */
+const createSAMBasedMasking = (
+  samMapping: SAMToVertexMapping,
+  maskingGroups: MaskingGroup[],
+  vertexCount: number
+): VertexMasking => {
+  console.log('🎭 Creating SAM-based masking...');
+  
+  const masking: VertexMasking = {};
+  
+  // Initialize all groups
+  maskingGroups.forEach(group => {
+    masking[group.id] = [];
+  });
+  
+  // Map SAM groups to masking groups
+  Object.entries(samMapping).forEach(([samGroupId, vertexIndices]) => {
+    // Find corresponding masking group
+    const maskingGroup = maskingGroups.find(g => g.id === samGroupId);
+    
+    if (maskingGroup && vertexIndices.length > 0) {
+      masking[maskingGroup.id] = [...vertexIndices]; // Copy vertex indices
+      console.log(`🎭 SAM group ${samGroupId}: ${vertexIndices.length} vertices`);
+    } else if (vertexIndices.length > 0) {
+      console.log(`⚠️ SAM group ${samGroupId} not found in masking groups, skipping ${vertexIndices.length} vertices`);
+    }
+  });
+  
+  // Verify all vertices are assigned
+  const totalAssigned = Object.values(masking).reduce((sum, vertices) => sum + vertices.length, 0);
+  console.log(`🎭 SAM masking complete: ${totalAssigned}/${vertexCount} vertices assigned`);
+  
+  if (totalAssigned === 0) {
+    console.error('❌ No vertices assigned from SAM mapping - falling back to geometric');
+    // Return basic fallback masking
+    const fallbackMasking: VertexMasking = {};
+    maskingGroups.forEach((group, index) => {
+      const startIdx = Math.floor(index * vertexCount / maskingGroups.length);
+      const endIdx = Math.floor((index + 1) * vertexCount / maskingGroups.length);
+      fallbackMasking[group.id] = Array.from({ length: endIdx - startIdx }, (_, i) => startIdx + i);
+    });
+    return fallbackMasking;
+  }
+  
+  logMaskingResults(masking, vertexCount);
+  return masking;
+};
+
+/**
+ * Checks if masking groups are SAM-based (have sam_mask_ prefix)
+ */
+const usesSAMGroups = (maskingGroups: MaskingGroup[]): boolean => {
+  return maskingGroups.some(group => group.id.startsWith('sam_mask_'));
+};
+
+/**
  * Creates AI-informed masking based on backend analysis
  */
 const createAIInformedMasking = (
@@ -83,7 +184,7 @@ const createAIInformedMasking = (
   aiGroups: any,
   masking: VertexMasking
 ): VertexMasking => {
-  console.log('Using AI-based geometric segmentation with', Object.keys(aiGroups).length, 'groups');
+  console.log('🤖 Using AI-based geometric segmentation with', Object.keys(aiGroups).length, 'groups');
   console.log('AI Groups:', Object.keys(aiGroups));
   console.log('Frontend Groups:', maskingGroups.map(g => g.id));
   
@@ -179,7 +280,7 @@ const createFallbackMasking = (
   maskingGroups: MaskingGroup[],
   masking: VertexMasking
 ): VertexMasking => {
-  console.log('Using fallback geometric segmentation');
+  console.log('📐 Using fallback geometric segmentation');
   
   for (let i = 0; i < vertexCount; i++) {
     const y = positions.getY(i);
@@ -217,7 +318,7 @@ const logMaskingResults = (masking: VertexMasking, vertexCount: number): void =>
 };
 
 /**
- * Applies vertex colors based on masking groups and paint colors
+ * Applies vertex colors based on masking groups and paint colors - IMPROVED
  */
 export const applyVertexColors = (
   geometry: THREE.BufferGeometry, 
@@ -229,8 +330,8 @@ export const applyVertexColors = (
   const vertexCount = positions.count;
   const colors = new Float32Array(vertexCount * 3);
   
-  // Default color (gray)
-  const defaultColor = new THREE.Color(0xA0A0A0);
+  // IMPROVED: Better default color (light gray instead of dark gray)
+  const defaultColor = new THREE.Color(0xCCCCCC); // Lighter default
   for (let i = 0; i < vertexCount; i++) {
     colors[i * 3] = defaultColor.r;
     colors[i * 3 + 1] = defaultColor.g;
