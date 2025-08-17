@@ -166,31 +166,40 @@ const parseBinarySTL = (arrayBuffer: ArrayBuffer): THREE.BufferGeometry => {
   return geometry;
 };
 
-// SAM Processing Functions
+// SAM Processing Functions - UPDATED FOR ENHANCED BACKEND
 const processSAMResults = (samResults: any, mesh: THREE.Mesh, camera: THREE.PerspectiveCamera, renderer: THREE.WebGLRenderer) => {
-  console.log('🎭 PROCESSING SAM RESULTS...');
+  console.log('🎭 PROCESSING ENHANCED SAM RESULTS...');
+  console.log(`Input: ${samResults.masks.length} superpoint-based regions`);
   
   const vertexMapping: any = {};
-  const maskingGroups = samResults.masks.map((mask: any, index: number) => ({
-    id: `sam_mask_${mask.mask_id}`,
-    name: `Region ${mask.mask_id + 1} (${(mask.area/1000).toFixed(1)}k px)`,
-    color: `hsl(${(mask.mask_id * 137.5) % 360}, 70%, 60%)`,
-    visible: true
-  }));
-
-  // Simple mock vertex mapping for demo
-  const geometry = mesh.geometry as THREE.BufferGeometry;
-  const vertexCount = geometry.attributes.position.count;
-  
-  samResults.masks.forEach((mask: any, index: number) => {
+  const maskingGroups = samResults.masks.map((mask: any, index: number) => {
     const groupId = `sam_mask_${mask.mask_id}`;
-    const startVertex = Math.floor((index / samResults.masks.length) * vertexCount);
-    const endVertex = Math.floor(((index + 1) / samResults.masks.length) * vertexCount);
-    vertexMapping[groupId] = [];
     
-    for (let i = startVertex; i < endVertex; i++) {
-      vertexMapping[groupId].push(i);
+    // Use actual vertex assignments from superpoint mapping
+    if (mask.vertices && mask.vertices.length > 0) {
+      vertexMapping[groupId] = mask.vertices;
+      console.log(`  Region ${mask.mask_id}: ${mask.vertices.length} vertices assigned via superpoints`);
+    } else {
+      vertexMapping[groupId] = [];
+      console.log(`  Region ${mask.mask_id}: No vertices assigned`);
     }
+    
+    return {
+      id: groupId,
+      name: `Region ${mask.mask_id + 1} (${mask.vertices?.length || 0} vtx)`,
+      color: `hsl(${(mask.mask_id * 137.5) % 360}, 70%, 60%)`,
+      visible: true
+    };
+  });
+  
+  // Log final results
+  const totalVertices = Object.values(vertexMapping).reduce((sum: number, vertices: any) => sum + vertices.length, 0);
+  console.log(`✅ Enhanced SAM processing complete:`);
+  console.log(`   Regions: ${maskingGroups.length}`);
+  console.log(`   Total vertices assigned: ${totalVertices}`);
+  
+  Object.entries(vertexMapping).forEach(([groupId, vertices]: [string, any]) => {
+    console.log(`     ${groupId}: ${vertices.length} vertices`);
   });
 
   return { vertexMapping, maskingGroups };
@@ -402,33 +411,252 @@ const ThreeScene: React.FC<ThreeSceneProps> = ({
     };
     animate();
 
-    // Setup SAM test functions
-    (window as any).testSAMCapture = () => {
-      console.log('🎯 Enhanced SAM test called!');
+    // Setup SAM test functions - FIXED TO USE CORRECT BACKEND ENDPOINTS
+    (window as any).testSAMCapture = async () => {
+      console.log('🎯 REAL SAM test called - using enhanced backend workflow...');
       
       if (sceneRef.current && cameraRef.current && rendererRef.current && meshRef.current) {
-        console.log('✅ All refs available, calling enhanced SAM capture...');
+        console.log('✅ All refs available, starting enhanced SAM workflow...');
         
-        // Position camera for optimal view
-        cameraRef.current.position.set(0, 8, 12);
-        cameraRef.current.lookAt(0, 4, 0);
-        cameraRef.current.updateMatrixWorld();
-        
-        // Force a render
-        rendererRef.current.render(sceneRef.current, cameraRef.current);
-        
-        // Capture the view
-        const colorPNG = rendererRef.current.domElement.toDataURL('image/png');
-        
-        // Mock SAM backend call
-        setTimeout(() => {
+        try {
+          // First, check if SAM is initialized
+          console.log('🔍 Checking SAM backend status...');
+          const healthResponse = await fetch('http://localhost:5000/health');
+          if (!healthResponse.ok) {
+            throw new Error('Backend not available');
+          }
+          
+          const healthData = await healthResponse.json();
+          console.log('✅ Backend health:', healthData);
+          
+          if (!healthData.sam_loaded) {
+            console.log('🤖 Initializing SAM...');
+            const initResponse = await fetch('http://localhost:5000/init-sam', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({
+                model_type: 'vit_b',
+                checkpoint_path: './checkpoints/sam_vit_b_01ec64.pth',
+                device: 'cpu'
+              })
+            });
+            
+            if (!initResponse.ok) {
+              throw new Error('SAM initialization failed');
+            }
+            
+            const initData = await initResponse.json();
+            console.log('✅ SAM initialized:', initData);
+          }
+          
+          // Step 1: Analyze mesh and create superpoints
+          console.log('📐 Step 1: Analyzing mesh geometry...');
+          const geometry = meshRef.current.geometry;
+          
+          // Debug geometry attributes
+          console.log('🔍 Geometry debug info:', {
+            isBufferGeometry: geometry instanceof THREE.BufferGeometry,
+            attributes: Object.keys(geometry.attributes),
+            hasIndex: !!geometry.index,
+            indexType: geometry.index ? 'present' : 'null'
+          });
+          
+          const positionAttribute = geometry.getAttribute('position');
+          const indexAttribute = geometry.getIndex();
+          
+          console.log('🔍 Attribute details:', {
+            positionAttribute: !!positionAttribute,
+            positionCount: positionAttribute?.count,
+            indexAttribute: !!indexAttribute,
+            indexCount: indexAttribute?.count
+          });
+
+          if (!positionAttribute) {
+            throw new Error('Mesh missing position attribute - geometry may not be loaded properly');
+          }
+          
+          if (!indexAttribute) {
+            console.log('⚠️ Mesh missing index attribute - attempting to generate indices...');
+            
+            // Try to generate indices if missing
+            const vertexCount = positionAttribute.count;
+            const indices = [];
+            for (let i = 0; i < vertexCount; i++) {
+              indices.push(i);
+            }
+            geometry.setIndex(indices);
+            
+            const newIndexAttribute = geometry.getIndex();
+            if (!newIndexAttribute) {
+              throw new Error('Could not generate indices for geometry');
+            }
+            
+            console.log('✅ Generated indices for geometry');
+          }
+
+          const vertices = positionAttribute.array as Float32Array;
+          const faces = (geometry.getIndex()?.array || new Uint32Array(0)) as Uint32Array;
+          
+          console.log('📊 Mesh stats:', {
+            vertices: vertices.length / 3,
+            faces: faces.length / 3,
+            totalVertexValues: vertices.length,
+            totalFaceValues: faces.length
+          });
+          
+          if (vertices.length === 0) {
+            throw new Error('Mesh has no vertex data');
+          }
+          
+          if (faces.length === 0) {
+            throw new Error('Mesh has no face data');
+          }
+
+          // Convert to backend format
+          const verticesArray = Array.from(vertices);
+          const facesArray = Array.from(faces);
+
+          const reshapedVertices = [];
+          for (let i = 0; i < verticesArray.length; i += 3) {
+            reshapedVertices.push([
+              verticesArray[i],
+              verticesArray[i + 1],
+              verticesArray[i + 2]
+            ]);
+          }
+
+          const reshapedFaces = [];
+          for (let i = 0; i < facesArray.length; i += 3) {
+            reshapedFaces.push([
+              facesArray[i],
+              facesArray[i + 1],
+              facesArray[i + 2]
+            ]);
+          }
+
+          const meshAnalysisResponse = await fetch('http://localhost:5000/analyze-mesh', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              vertices: reshapedVertices,
+              faces: reshapedFaces
+            })
+          });
+
+          if (!meshAnalysisResponse.ok) {
+            throw new Error('Mesh analysis failed');
+          }
+
+          const meshAnalysis = await meshAnalysisResponse.json();
+          console.log(`✅ Mesh analysis complete: ${meshAnalysis.stats.num_superpoints} superpoints created`);
+          
+          // Step 2: Render multiple views for SAM processing
+          console.log('📸 Step 2: Rendering multiple views for SAM...');
+          
+          // Create temporary renderer for view capture
+          const tempRenderer = new THREE.WebGLRenderer({ 
+            antialias: true, 
+            preserveDrawingBuffer: true,
+            alpha: true
+          });
+          tempRenderer.setSize(512, 512);
+          tempRenderer.setClearColor(0x000000, 0);
+          
+          const tempCamera = new THREE.PerspectiveCamera(60, 1.0, 0.1, 1000);
+          
+          const viewImages: string[] = [];
+          const viewInfo: any[] = [];
+
+          // Render each camera view
+          for (const view of meshAnalysis.camera_views) {
+            tempCamera.position.set(view.position[0], view.position[1], view.position[2]);
+            tempCamera.lookAt(view.target[0], view.target[1], view.target[2]);
+            tempCamera.up.set(view.up[0], view.up[1], view.up[2]);
+            tempCamera.fov = view.fov;
+            tempCamera.aspect = view.aspect;
+            tempCamera.near = view.near;
+            tempCamera.far = view.far;
+            tempCamera.updateProjectionMatrix();
+
+            tempRenderer.render(sceneRef.current, tempCamera);
+            
+            const imageData = tempRenderer.domElement.toDataURL('image/png');
+            viewImages.push(imageData);
+            viewInfo.push(view);
+          }
+
+          tempRenderer.dispose();
+          console.log(`📷 Captured ${viewImages.length} views for SAM processing`);
+
+          // Step 3: Process with multi-view SAM
+          console.log('🤖 Step 3: Processing with multi-view SAM...');
+          
+          const samResponse = await fetch('http://localhost:5000/process-multiview-sam', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              view_images: viewImages,
+              view_info: viewInfo,
+              superpoints: meshAnalysis.superpoints
+            })
+          });
+
+          if (!samResponse.ok) {
+            throw new Error('SAM processing failed');
+          }
+
+          const samResult = await samResponse.json();
+          console.log(`✅ SAM processing complete: ${samResult.stats.total_masks_generated} masks generated, ${samResult.stats.total_masks_assigned} assigned`);
+
+          // Format results for frontend
+          const formattedResult = {
+            masks: samResult.assignments.map((assignment: any, index: number) => ({
+              mask_id: index,
+              area: assignment.vertices.length * 10, // Approximate area based on vertex count
+              stability_score: 0.9,
+              pixel_coords: [], // Not needed for superpoint-based approach
+              bbox: [0, 0, 100, 100], // Placeholder bbox
+              vertices: assignment.vertices
+            })),
+            viewport_size: { width: 512, height: 512 },
+            camera_data: {
+              camera_matrix: cameraRef.current?.matrixWorld.toArray() || Array(16).fill(0),
+              projection_matrix: cameraRef.current?.projectionMatrix.toArray() || Array(16).fill(0)
+            },
+            superpoints: meshAnalysis.superpoints,
+            assignments: samResult.assignments,
+            stats: {
+              mesh_analysis: meshAnalysis.stats,
+              sam_processing: samResult.stats
+            }
+          };
+
+          // Send results to frontend callback
+          if ((window as any).onSAMResults) {
+            console.log('🔄 Calling frontend onSAMResults with enhanced SAM data...');
+            (window as any).onSAMResults(formattedResult);
+            console.log('✅ Enhanced SAM workflow complete!');
+          }
+          
+        } catch (error) {
+          console.error('❌ Enhanced SAM workflow failed:', error);
+          
+          // Show user-friendly error
+          if (error instanceof Error) {
+            if (error.message.includes('fetch') || error.message.includes('Backend not available')) {
+              alert('❌ Cannot connect to SAM backend. Please ensure the Python server is running on localhost:5000');
+            } else {
+              alert(`❌ SAM processing failed: ${error.message}`);
+            }
+          }
+          
+          // Fallback to mock data for UI testing
+          console.log('🔄 Falling back to mock data for UI testing...');
           const mockSamResults = {
             masks: [
               { mask_id: 0, area: 2400, stability_score: 0.95, pixel_coords: [[100,200], [101,200]], bbox: [90, 190, 50, 50] },
               { mask_id: 1, area: 1800, stability_score: 0.91, pixel_coords: [[200,300], [201,300]], bbox: [190, 290, 40, 40] },
-              { mask_id: 2, area: 1500, stability_score: 0.88, pixel_coords: [[300,400], [301,400]], bbox: [290, 390, 35, 35] },
-              { mask_id: 3, area: 1200, stability_score: 0.85, pixel_coords: [[400,500], [401,500]], bbox: [390, 490, 30, 30] },
-              { mask_id: 4, area: 900, stability_score: 0.82, pixel_coords: [[500,600], [501,600]], bbox: [490, 590, 25, 25] }
+              { mask_id: 2, area: 1500, stability_score: 0.88, pixel_coords: [[300,400], [301,400]], bbox: [290, 390, 35, 35] }
             ],
             viewport_size: { width: 1024, height: 1024 },
             camera_data: {
@@ -439,8 +667,18 @@ const ThreeScene: React.FC<ThreeSceneProps> = ({
           
           if ((window as any).onSAMResults) {
             (window as any).onSAMResults(mockSamResults);
+            console.log('✅ Fallback mock SAM results sent to frontend');
           }
-        }, 1000);
+        }
+      } else {
+        console.log('❌ Scene not ready for SAM capture');
+        console.log('Missing refs:', {
+          scene: !sceneRef.current,
+          camera: !cameraRef.current,
+          renderer: !rendererRef.current,
+          mesh: !meshRef.current
+        });
+        alert('Scene not ready for SAM capture. Please wait for model to load.');
       }
     };
 
@@ -1078,8 +1316,12 @@ const App: React.FC = () => {
                   <div style={{ display: 'flex', gap: '12px', flexDirection: 'column' }}>
                     <button
                       onClick={() => {
+                        console.log('🚀 Starting ENHANCED SAM analysis with advanced backend...');
                         if ((window as any).testSAMCapture) {
                           (window as any).testSAMCapture();
+                        } else {
+                          console.error('❌ Enhanced SAM function not available');
+                          alert('Enhanced SAM function not ready. Please wait for scene to load.');
                         }
                       }}
                       style={{
@@ -1093,7 +1335,42 @@ const App: React.FC = () => {
                         fontWeight: '600'
                       }}
                     >
-                      🎯 Run SAM Segmentation
+                      🎯 Run Enhanced SAM (Multi-View + Superpoints)
+                    </button>
+                    
+                    <button
+                      onClick={() => {
+                        console.log('🎨 Quick UI test with mock SAM data...');
+                        const quickMockResults = {
+                          masks: [
+                            { mask_id: 0, area: 1500, stability_score: 0.99, pixel_coords: [[200,200], [201,201]], bbox: [190, 190, 20, 20] },
+                            { mask_id: 1, area: 1200, stability_score: 0.92, pixel_coords: [[400,400], [401,401]], bbox: [390, 390, 20, 20] },
+                            { mask_id: 2, area: 900, stability_score: 0.88, pixel_coords: [[600,600], [601,601]], bbox: [590, 590, 20, 20] }
+                          ],
+                          viewport_size: { width: 1024, height: 1024 },
+                          camera_data: {
+                            camera_matrix: Array(16).fill(0),
+                            projection_matrix: Array(16).fill(0)
+                          }
+                        };
+                        
+                        if ((window as any).onSAMResults) {
+                          (window as any).onSAMResults(quickMockResults);
+                          console.log('✅ Quick mock test completed');
+                        }
+                      }}
+                      style={{
+                        padding: '8px 16px',
+                        background: 'linear-gradient(to right, #8B5CF6, #7C3AED)',
+                        color: 'white',
+                        borderRadius: '6px',
+                        border: 'none',
+                        cursor: 'pointer',
+                        fontSize: '12px',
+                        fontWeight: '500'
+                      }}
+                    >
+                      🎨 Quick Mock Test (UI Only)
                     </button>
                     
                     <button
@@ -1125,7 +1402,15 @@ const App: React.FC = () => {
                     </button>
                   </div>
                   <div style={{ fontSize: '12px', color: '#6B7280', marginTop: '8px', lineHeight: '1.4' }}>
-                    Status: Scene {meshRef.current && cameraRef.current && rendererRef.current ? '✅ Ready' : '⏳ Loading'} for 3D mapping
+                    <div style={{ marginBottom: '4px' }}>
+                      <strong>🎯 Enhanced SAM:</strong> Uses your advanced backend with mesh analysis + multi-view SAM
+                    </div>
+                    <div style={{ marginBottom: '4px' }}>
+                      <strong>🎨 Mock Test:</strong> UI testing with fake data (no backend required)
+                    </div>
+                    <div>
+                      <strong>Status:</strong> Scene {meshRef.current && cameraRef.current && rendererRef.current ? '✅ Ready' : '⏳ Loading'} for processing
+                    </div>
                   </div>
                 </div>
               )}
