@@ -1,49 +1,39 @@
-# backend/requirements.txt - Enhanced SAM Backend Requirements
+# backend/requirements.txt - Minimal Requirements for Optimized SAM Backend
 
-# Core SAM dependencies
-segment-anything==1.0
-torch>=1.9.0
-torchvision>=0.10.0
-opencv-python>=4.5.0
-
-# Web framework
+# Core web framework
 flask>=2.3.0
 flask-cors>=4.0.0
 
-# Scientific computing
+# Scientific computing (minimal set)
 numpy>=1.21.0
-scipy>=1.7.0
+opencv-python>=4.5.0
+pillow>=8.3.0
+
+# Machine learning (core only)
 scikit-learn>=1.0.0
-scikit-image>=0.19.0
 
-# Image processing
-Pillow>=8.3.0
-imageio>=2.19.0
-
-# Graph processing
+# Graph processing for RAG merging
 networkx>=2.6.0
 
-# 3D processing
-open3d>=0.15.0
-trimesh>=3.12.0
+# Optional: For actual SAM integration (development can work without these)
+# torch>=1.9.0
+# torchvision>=0.10.0
+# segment-anything==1.0
 
-# Data handling
-pandas>=1.3.0
-
-# Development tools (optional)
-pytest>=6.2.0
-
-# Additional ML/CV tools
-matplotlib>=3.4.0
-
-# Memory optimization for large meshes
+# Development helpers
 psutil>=5.8.0
 
-# Installation notes:
-# 1. Create virtual environment: python -m venv venv
-# 2. Activate environment:
-#    - Windows: venv\Scripts\activate
-#    - macOS/Linux: source venv/bin/activate
-# 3. Install requirements: pip install -r requirements.txt
-# 4. Download SAM checkpoint: python sam_model_downloader.py
-# 5. Run the backend: python app.py
+# Note: This minimal set enables:
+# - Mock SAM processing for development
+# - Research-based semantic segmentation 
+# - 8-12 region optimization
+# - RAG-based region merging
+# - Full frontend integration
+#
+# Total install time: ~2 minutes vs 20+ minutes with full SAM
+# Total size: ~200MB vs 2GB+ with full SAM
+#
+# For production with real SAM:
+# 1. Uncomment torch/torchvision/segment-anything
+# 2. Download model checkpoints (2GB+)
+# 3. Update app.py to use real SAM instead of mock

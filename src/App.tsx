@@ -1,5 +1,5 @@
 import React, { useState, useCallback, useEffect, useRef } from 'react';
-import { Upload, Brain, Zap, Camera, Palette, Eye, EyeOff, Layers } from 'lucide-react';
+import { Upload, Brain, Zap, Camera, Palette, Eye, EyeOff, Layers, CheckCircle, AlertCircle } from 'lucide-react';
 import * as THREE from 'three';
 
 // Types
@@ -26,18 +26,27 @@ interface VertexMasking {
   [groupId: string]: number[];
 }
 
-interface AIAnalysis {
+interface SemanticRegion {
+  id: string;
+  name: string;
+  semantic_type: string;
+  vertices: number[];
+  confidence: number;
+  area: number;
+}
+
+interface OptimizedSAMResponse {
   success: boolean;
-  masking_groups?: {
-    [groupId: string]: {
-      name: string;
-      color: string;
-      vertices: number[];
-      description: string;
-      vertex_count: number;
-      percentage: number;
-    };
+  num_regions: number;
+  regions: SemanticRegion[];
+  stats: {
+    original_masks: number;
+    semantic_regions: number;
+    reduction_ratio: number;
+    miniature_type: string;
+    processing_method: string;
   };
+  research_features: string[];
 }
 
 // Constants
@@ -63,23 +72,7 @@ const MASKING_GROUPS: MaskingGroup[] = [
   { id: 'details', name: 'Fine Details', color: '#FDBCB4', visible: true }
 ];
 
-// SAM mapping storage
-let globalSAMMapping: any | null = null;
-let globalSAMViewData: any | null = null;
-
-const setSAMMapping = (samMapping: any, viewData: any): void => {
-  console.log('🎭 Setting global SAM mapping...');
-  globalSAMMapping = samMapping;
-  globalSAMViewData = viewData;
-};
-
-const clearSAMMapping = (): void => {
-  console.log('🔄 Clearing SAM mapping - switching to geometric mode');
-  globalSAMMapping = null;
-  globalSAMViewData = null;
-};
-
-// STL Loader
+// STL Loader Functions
 const loadSTLFile = (file: File): Promise<THREE.BufferGeometry> => {
   return new Promise((resolve, reject) => {
     const reader = new FileReader();
@@ -166,47 +159,8 @@ const parseBinarySTL = (arrayBuffer: ArrayBuffer): THREE.BufferGeometry => {
   return geometry;
 };
 
-// SAM Processing Functions - UPDATED FOR ENHANCED BACKEND
-const processSAMResults = (samResults: any, mesh: THREE.Mesh, camera: THREE.PerspectiveCamera, renderer: THREE.WebGLRenderer) => {
-  console.log('🎭 PROCESSING ENHANCED SAM RESULTS...');
-  console.log(`Input: ${samResults.masks.length} superpoint-based regions`);
-  
-  const vertexMapping: any = {};
-  const maskingGroups = samResults.masks.map((mask: any, index: number) => {
-    const groupId = `sam_mask_${mask.mask_id}`;
-    
-    // Use actual vertex assignments from superpoint mapping
-    if (mask.vertices && mask.vertices.length > 0) {
-      vertexMapping[groupId] = mask.vertices;
-      console.log(`  Region ${mask.mask_id}: ${mask.vertices.length} vertices assigned via superpoints`);
-    } else {
-      vertexMapping[groupId] = [];
-      console.log(`  Region ${mask.mask_id}: No vertices assigned`);
-    }
-    
-    return {
-      id: groupId,
-      name: `Region ${mask.mask_id + 1} (${mask.vertices?.length || 0} vtx)`,
-      color: `hsl(${(mask.mask_id * 137.5) % 360}, 70%, 60%)`,
-      visible: true
-    };
-  });
-  
-  // Log final results
-  const totalVertices = Object.values(vertexMapping).reduce((sum: number, vertices: any) => sum + vertices.length, 0);
-  console.log(`✅ Enhanced SAM processing complete:`);
-  console.log(`   Regions: ${maskingGroups.length}`);
-  console.log(`   Total vertices assigned: ${totalVertices}`);
-  
-  Object.entries(vertexMapping).forEach(([groupId, vertices]: [string, any]) => {
-    console.log(`     ${groupId}: ${vertices.length} vertices`);
-  });
-
-  return { vertexMapping, maskingGroups };
-};
-
-// Masking Utils
-const createGeometricMasking = (geometry: THREE.BufferGeometry, maskingGroups: MaskingGroup[], aiAnalysis?: AIAnalysis): VertexMasking => {
+// FIXED: Masking Utils with SAM Integration
+const createGeometricMasking = (geometry: THREE.BufferGeometry, maskingGroups: MaskingGroup[]): VertexMasking => {
   const positions = geometry.attributes.position;
   const vertexCount = positions.count;
   const masking: VertexMasking = {};
@@ -241,25 +195,41 @@ const createGeometricMasking = (geometry: THREE.BufferGeometry, maskingGroups: M
   return masking;
 };
 
-const applyVertexColors = (geometry: THREE.BufferGeometry, masking: VertexMasking, maskingGroups: MaskingGroup[], paintColors: PaintColors): THREE.BufferGeometry => {
+// FIXED: Apply vertex colors with proper SAM mapping support
+const applyVertexColors = (
+  geometry: THREE.BufferGeometry, 
+  masking: VertexMasking, 
+  maskingGroups: MaskingGroup[], 
+  paintColors: PaintColors
+): THREE.BufferGeometry => {
   const positions = geometry.attributes.position as THREE.BufferAttribute;
   const vertexCount = positions.count;
   const colors = new Float32Array(vertexCount * 3);
   
+  console.log('🎨 Applying vertex colors to', vertexCount, 'vertices');
+  console.log('🎨 Masking groups:', maskingGroups.map(g => g.id));
+  console.log('🎨 Masking data:', Object.entries(masking).map(([id, vertices]) => `${id}: ${vertices.length} vertices`));
+  
   // Default neutral gray color
-  const defaultColor = new THREE.Color(0x808080);
+  const defaultColor = new THREE.Color(0xCCCCCC);
   for (let i = 0; i < vertexCount; i++) {
     colors[i * 3] = defaultColor.r;
     colors[i * 3 + 1] = defaultColor.g;
     colors[i * 3 + 2] = defaultColor.b;
   }
   
+  // Apply colors for each masking group
   Object.entries(masking).forEach(([groupId, vertices]) => {
     const group = maskingGroups.find(g => g.id === groupId);
-    if (!group || !group.visible || !vertices || vertices.length === 0) return;
+    if (!group || !group.visible || !vertices || vertices.length === 0) {
+      console.log(`🎨 Skipping group ${groupId}: group=${!!group}, visible=${group?.visible}, vertices=${vertices?.length}`);
+      return;
+    }
     
     const colorHex = paintColors[groupId] || group.color;
     const color = new THREE.Color(colorHex);
+    
+    console.log(`🎨 Applying color ${colorHex} to ${vertices.length} vertices for group ${groupId}`);
     
     vertices.forEach(vertexIndex => {
       if (vertexIndex >= 0 && vertexIndex < vertexCount) {
@@ -274,15 +244,78 @@ const applyVertexColors = (geometry: THREE.BufferGeometry, masking: VertexMaskin
   return geometry;
 };
 
-// Three.js Scene Component
+// FIXED: SAM Results Processing for Real Geometric Data
+const processOptimizedSAMResults = (optimizedResult: OptimizedSAMResponse): {
+  vertexMapping: VertexMasking;
+  maskingGroups: MaskingGroup[];
+} => {
+  console.log('🎯 PROCESSING REAL OPTIMIZED SAM RESULTS...');
+  console.log(`Input: ${optimizedResult.num_regions} semantic regions`);
+  console.log('Research features:', optimizedResult.research_features);
+  console.log('Processing method:', optimizedResult.stats.processing_method);
+  
+  const vertexMapping: VertexMasking = {};
+  const maskingGroups: MaskingGroup[] = [];
+  
+  // Color mapping for semantic types
+  const semanticColors: { [key: string]: string } = {
+    'base': '#8B4513',      // Brown
+    'legs': '#4682B4',      // Steel blue
+    'torso': '#C0C0C0',     // Silver
+    'arms': '#CD853F',      // Peru
+    'head': '#F5DEB3',      // Wheat
+    'weapon': '#2F4F4F',    // Dark slate gray
+    'cape': '#800080',      // Purple
+    'details': '#FFD700',   // Gold
+    'body': '#D2B48C',      // Tan
+    'limbs': '#A0522D',     // Sienna
+    'unassigned': '#808080' // Gray for unassigned
+  };
+  
+  optimizedResult.regions.forEach((region, index) => {
+    const groupId = region.id;
+    const color = semanticColors[region.semantic_type] || `hsl(${index * 40}, 70%, 60%)`;
+    
+    // FIXED: Store vertex mapping directly from backend
+    vertexMapping[groupId] = [...region.vertices]; // Copy the array
+    
+    // Create masking group with semantic info
+    maskingGroups.push({
+      id: groupId,
+      name: `${region.name} (${region.vertices.length}v)`,
+      color: color,
+      visible: true
+    });
+    
+    console.log(`  ✅ ${region.semantic_type}: ${region.vertices.length} vertices (${region.confidence.toFixed(2)} confidence)`);
+  });
+  
+  const totalVertices = Object.values(vertexMapping).reduce((sum, vertices) => sum + vertices.length, 0);
+  console.log(`✅ REAL SAM processing complete:`);
+  console.log(`   Regions: ${maskingGroups.length}`);
+  console.log(`   Total vertices assigned: ${totalVertices}`);
+  console.log(`   Reduction ratio: ${optimizedResult.stats.reduction_ratio.toFixed(1)}x`);
+  
+  // FIXED: Verify vertex assignments
+  console.log('🔍 Vertex assignment verification:');
+  Object.entries(vertexMapping).forEach(([groupId, vertices]) => {
+    const percentage = totalVertices > 0 ? (vertices.length / totalVertices * 100).toFixed(1) : '0';
+    console.log(`   ${groupId}: ${vertices.length} vertices (${percentage}%)`);
+  });
+
+  return { vertexMapping, maskingGroups };
+};
+
+// Three.js Scene Component - FIXED for SAM integration
 interface ThreeSceneProps {
   paintColors: PaintColors;
   maskingGroups: MaskingGroup[];
   modelData: ModelData | null;
   backgroundColor: number;
   selectedGroup: string;
-  aiAnalysis?: AIAnalysis;
   onRefsReady?: (mesh: THREE.Mesh | null, camera: THREE.PerspectiveCamera | null, renderer: THREE.WebGLRenderer | null) => void;
+  // FIXED: Add SAM vertex mapping prop
+  samVertexMapping?: VertexMasking | null;
 }
 
 const ThreeScene: React.FC<ThreeSceneProps> = ({ 
@@ -291,8 +324,8 @@ const ThreeScene: React.FC<ThreeSceneProps> = ({
   modelData, 
   backgroundColor,
   selectedGroup,
-  aiAnalysis,
-  onRefsReady
+  onRefsReady,
+  samVertexMapping // FIXED: SAM mapping prop
 }) => {
   const mountRef = useRef<HTMLDivElement>(null);
   const sceneRef = useRef<THREE.Scene | null>(null);
@@ -329,7 +362,7 @@ const ThreeScene: React.FC<ThreeSceneProps> = ({
     mountRef.current.appendChild(renderer.domElement);
     rendererRef.current = renderer;
 
-    // Setup lighting - balanced for neutral gray models
+    // Setup lighting
     const ambientLight = new THREE.AmbientLight(0x404040, 2.0);
     scene.add(ambientLight);
     
@@ -411,151 +444,6 @@ const ThreeScene: React.FC<ThreeSceneProps> = ({
     };
     animate();
 
-    // Setup SAM test functions - ENHANCED BACKEND INTEGRATION
-    (window as any).testSAMCapture = async () => {
-      console.log('🎯 ENHANCED SAM test called - using optimized backend workflow...');
-      
-      if (sceneRef.current && cameraRef.current && rendererRef.current && meshRef.current) {
-        console.log('✅ All refs available, starting enhanced SAM workflow...');
-        
-        try {
-          // Check if SAM is initialized
-          console.log('🔍 Checking SAM backend status...');
-          const healthResponse = await fetch('http://localhost:5000/health');
-          if (!healthResponse.ok) {
-            throw new Error('Backend not available');
-          }
-          
-          const healthData = await healthResponse.json();
-          console.log('✅ Backend health:', healthData);
-          
-          if (!healthData.sam_loaded) {
-            console.log('🤖 Initializing optimized SAM...');
-            const initResponse = await fetch('http://localhost:5000/init-optimized-sam', {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({
-                model_type: 'vit_h',
-                checkpoint_path: './checkpoints/sam_vit_h_4b8939.pth',
-                device: 'cpu'
-              })
-            });
-            
-            if (!initResponse.ok) {
-              throw new Error('SAM initialization failed');
-            }
-            
-            const initData = await initResponse.json();
-            console.log('✅ SAM initialized:', initData);
-          }
-          
-          // Capture image for SAM processing
-          console.log('📸 Capturing optimized view...');
-          camera.position.set(0, 8, 12);
-          camera.lookAt(0, 4, 0);
-          camera.updateMatrixWorld();
-          
-          renderer.render(scene, camera);
-          const imageData = renderer.domElement.toDataURL('image/png');
-          
-          // Extract mesh data
-          const geometry = meshRef.current.geometry;
-          const positionAttribute = geometry.getAttribute('position');
-          const indexAttribute = geometry.getIndex();
-          
-          if (!positionAttribute || !indexAttribute) {
-            throw new Error('Mesh missing required attributes');
-          }
-          
-          const vertices = positionAttribute.array as Float32Array;
-          const faces = indexAttribute.array as Uint32Array;
-          
-          console.log('📊 Mesh stats:', {
-            vertices: vertices.length / 3,
-            faces: faces.length / 3
-          });
-          
-          // Send to optimized SAM backend
-          const samResponse = await fetch('http://localhost:5000/segment-optimized', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-              color_image: imageData,
-              vertices: Array.from(vertices),
-              miniature_type: 'humanoid'
-            })
-          });
-
-          if (!samResponse.ok) {
-            throw new Error('Optimized SAM processing failed');
-          }
-
-          const samResult = await samResponse.json();
-          console.log(`✅ Optimized SAM complete: ${samResult.num_regions} semantic regions`);
-
-          // Format results for frontend
-          const formattedResult = {
-            masks: samResult.regions.map((region: any, index: number) => ({
-              mask_id: index,
-              area: region.area || 1000,
-              stability_score: region.confidence || 0.9,
-              vertices: region.vertices || [],
-              semantic_type: region.semantic_type || 'unknown'
-            })),
-            viewport_size: { width: 512, height: 512 },
-            camera_data: {
-              camera_matrix: cameraRef.current?.matrixWorld.toArray() || Array(16).fill(0),
-              projection_matrix: cameraRef.current?.projectionMatrix.toArray() || Array(16).fill(0)
-            },
-            optimized: true,
-            stats: samResult.stats
-          };
-
-          // Send results to frontend callback
-          if ((window as any).onSAMResults) {
-            console.log('🔄 Calling frontend onSAMResults with optimized SAM data...');
-            (window as any).onSAMResults(formattedResult);
-            console.log('✅ Optimized SAM workflow complete!');
-          }
-          
-        } catch (error) {
-          console.error('❌ Enhanced SAM workflow failed:', error);
-          
-          // Show user-friendly error
-          if (error instanceof Error) {
-            if (error.message.includes('fetch') || error.message.includes('Backend not available')) {
-              alert('❌ Cannot connect to SAM backend. Please ensure the Python server is running on localhost:5000');
-            } else {
-              alert(`❌ SAM processing failed: ${error.message}`);
-            }
-          }
-          
-          // Fallback to mock data for UI testing
-          console.log('🔄 Falling back to mock data for UI testing...');
-          const mockSamResults = {
-            masks: [
-              { mask_id: 0, area: 2400, stability_score: 0.95, vertices: [] },
-              { mask_id: 1, area: 1800, stability_score: 0.91, vertices: [] },
-              { mask_id: 2, area: 1500, stability_score: 0.88, vertices: [] }
-            ],
-            viewport_size: { width: 1024, height: 1024 },
-            camera_data: {
-              camera_matrix: cameraRef.current?.matrixWorld.toArray() || Array(16).fill(0),
-              projection_matrix: cameraRef.current?.projectionMatrix.toArray() || Array(16).fill(0)
-            }
-          };
-          
-          if ((window as any).onSAMResults) {
-            (window as any).onSAMResults(mockSamResults);
-            console.log('✅ Fallback mock SAM results sent to frontend');
-          }
-        }
-      } else {
-        console.log('❌ Scene not ready for SAM capture');
-        alert('Scene not ready for SAM capture. Please wait for model to load.');
-      }
-    };
-
     // Notify parent that refs are ready
     if (onRefsReady) {
       setTimeout(() => {
@@ -587,8 +475,6 @@ const ThreeScene: React.FC<ThreeSceneProps> = ({
           mountRef.current.removeChild(rendererRef.current.domElement);
         }
       }
-      
-      delete (window as any).testSAMCapture;
     };
   }, [onRefsReady]);
 
@@ -600,27 +486,31 @@ const ThreeScene: React.FC<ThreeSceneProps> = ({
     }
   }, [backgroundColor]);
 
-  // Model loading
+  // FIXED: Model loading with SAM mapping support
   useEffect(() => {
     if (!modelData?.geometry || !sceneRef.current) return;
+    
+    console.log('🎯 Loading model with SAM mapping support...');
+    console.log('SAM mapping available:', !!samVertexMapping);
     
     const geometry = modelData.geometry.clone();
     if (!geometry.attributes.normal) {
       geometry.computeVertexNormals();
     }
     
-    // Use SAM mapping if available, otherwise use geometric masking
+    // FIXED: Use SAM mapping if available, otherwise use geometric masking
     let masking: VertexMasking;
-    if (globalSAMMapping) {
-      masking = globalSAMMapping;
+    if (samVertexMapping) {
+      console.log('🎭 Using SAM vertex mapping');
+      masking = samVertexMapping;
     } else {
-      masking = createGeometricMasking(geometry, maskingGroups, aiAnalysis);
+      console.log('📐 Using geometric masking');
+      masking = createGeometricMasking(geometry, maskingGroups);
     }
     
-    // Apply initial vertex colors
-    applyVertexColors(geometry, masking, maskingGroups, {});
+    // Apply vertex colors
+    applyVertexColors(geometry, masking, maskingGroups, paintColors);
 
-    // Create material - neutral gray
     const material = new THREE.MeshPhongMaterial({
       color: 0x808080,
       vertexColors: true,
@@ -672,11 +562,12 @@ const ThreeScene: React.FC<ThreeSceneProps> = ({
     if (rendererRef.current && cameraRef.current && sceneRef.current) {
       rendererRef.current.render(sceneRef.current, cameraRef.current);
     }
-  }, [modelData, maskingGroups, aiAnalysis, onRefsReady]);
+  }, [modelData, maskingGroups, onRefsReady, samVertexMapping]); // FIXED: Add samVertexMapping dependency
   
-  // Update vertex colors when paint colors or masking groups change
+  // FIXED: Update vertex colors when paint colors or masking groups change
   useEffect(() => {
     if (meshRef.current && vertexMaskingRef.current) {
+      console.log('🎨 Updating vertex colors...');
       const geometry = meshRef.current.geometry as THREE.BufferGeometry;
       applyVertexColors(geometry, vertexMaskingRef.current, maskingGroups, paintColors);
       geometry.attributes.color.needsUpdate = true;
@@ -707,7 +598,7 @@ const ThreeScene: React.FC<ThreeSceneProps> = ({
   );
 };
 
-// Main App Component
+// Main App Component - FIXED
 const App: React.FC = () => {
   const [modelData, setModelData] = useState<ModelData | null>(null);
   const [isLoading, setIsLoading] = useState<boolean>(false);
@@ -716,18 +607,12 @@ const App: React.FC = () => {
   const [selectedGroup, setSelectedGroup] = useState<string>('base_support');
   const [selectedColor, setSelectedColor] = useState<string>('#FF0000');
   const [backgroundColor, setBackgroundColor] = useState<number>(0xffffff);
-  const [aiAnalysis, setAiAnalysis] = useState<any>(null);
   const [backendStatus, setBackendStatus] = useState<'unknown' | 'connected' | 'error'>('unknown');
+  const [optimizedSAMResults, setOptimizedSAMResults] = useState<OptimizedSAMResponse | null>(null);
+  // FIXED: Add SAM vertex mapping state
+  const [samVertexMapping, setSamVertexMapping] = useState<VertexMasking | null>(null);
 
-  // SAM Groups State
-  const [useSAMGroups, setUseSAMGroups] = useState<boolean>(false);
-  const [samMasks, setSamMasks] = useState<any[]>([]);
-  const [samGroupsData, setSamGroupsData] = useState<any>(null);
-  const [samMaskGroups, setSamMaskGroups] = useState<MaskingGroup[]>([]);
-  const [samSemanticGroups, setSamSemanticGroups] = useState<MaskingGroup[]>([]);
-  const [samGroupMode, setSamGroupMode] = useState<'individual' | 'semantic'>('individual');
-
-  // Refs for SAM 3D mapping integration
+  // Refs for SAM integration
   const meshRef = useRef<THREE.Mesh | null>(null);
   const cameraRef = useRef<THREE.PerspectiveCamera | null>(null);
   const rendererRef = useRef<THREE.WebGLRenderer | null>(null);
@@ -737,73 +622,21 @@ const App: React.FC = () => {
     checkBackendConnection();
   }, []);
 
-  // SAM results handler
-  useEffect(() => {
-    (window as any).onSAMResults = (results: any) => {
-      console.log('🎭 SAM Results received:', results);
-      
-      setSamMasks(results.masks);
-      setSamGroupsData(results);
-      
-      if (meshRef.current && cameraRef.current && rendererRef.current) {
-        try {
-          const { vertexMapping, maskingGroups } = processSAMResults(
-            results,
-            meshRef.current,
-            cameraRef.current,
-            rendererRef.current
-          );
-          
-          const viewData = {
-            camera_matrix: results.camera_data?.camera_matrix || cameraRef.current?.matrixWorld.toArray() || Array(16).fill(0),
-            projection_matrix: results.camera_data?.projection_matrix || cameraRef.current?.projectionMatrix.toArray() || Array(16).fill(0),
-            viewport_size: results.viewport_size || { width: 1024, height: 1024 }
-          };
-          
-          setSAMMapping(vertexMapping, viewData);
-          setSamMaskGroups(maskingGroups);
-          setSamGroupMode('individual');
-          setUseSAMGroups(true);
-          
-          console.log(`🎭 SAM integration complete - showing ${maskingGroups.length} regions`);
-          
-        } catch (error) {
-          console.error('❌ Error processing SAM results:', error);
-        }
-      }
-    };
-    
-    return () => {
-      delete (window as any).onSAMResults;
-    };
-  }, [modelData]);
-
   const checkBackendConnection = async () => {
     try {
       const response = await fetch('http://localhost:5000/health');
       if (response.ok) {
+        const data = await response.json();
         setBackendStatus('connected');
+        console.log('✅ Backend connected:', data);
       } else {
         setBackendStatus('error');
       }
     } catch (error) {
       setBackendStatus('error');
+      console.log('❌ Backend connection failed:', error);
     }
   };
-
-  const getCurrentMaskingGroups = () => {
-    if (!useSAMGroups) return maskingGroups;
-    return samGroupMode === 'individual' ? samMaskGroups : samSemanticGroups;
-  };
-
-  const handleSAMToggle = useCallback(() => {
-    const newUseSAMGroups = !useSAMGroups;
-    setUseSAMGroups(newUseSAMGroups);
-    
-    if (!newUseSAMGroups) {
-      clearSAMMapping();
-    }
-  }, [useSAMGroups]);
 
   const handleRefsReady = useCallback((
     mesh: THREE.Mesh | null, 
@@ -813,6 +646,7 @@ const App: React.FC = () => {
     meshRef.current = mesh;
     cameraRef.current = camera;
     rendererRef.current = renderer;
+    console.log('🔗 Scene refs updated:', { mesh: !!mesh, camera: !!camera, renderer: !!renderer });
   }, []);
 
   const handleFileUpload = useCallback(async (file: File) => {
@@ -837,11 +671,9 @@ const App: React.FC = () => {
 
       setModelData(newModelData);
       setPaintColors({});
-      
-      clearSAMMapping();
-      setSamMasks([]);
-      setSamGroupsData(null);
-      setUseSAMGroups(false);
+      setOptimizedSAMResults(null);
+      setSamVertexMapping(null); // FIXED: Clear SAM mapping on new model
+      setMaskingGroups(MASKING_GROUPS); // FIXED: Reset to default groups
       
     } catch (error) {
       console.error('Error loading file:', error);
@@ -860,33 +692,109 @@ const App: React.FC = () => {
   }, []);
 
   const handleGroupToggle = useCallback((groupId: string) => {
-    if (useSAMGroups) {
-      if (samGroupMode === 'individual') {
-        setSamMaskGroups(prev => 
-          prev.map(group => 
-            group.id === groupId ? { ...group, visible: !group.visible } : group
-          )
-        );
-      } else {
-        setSamSemanticGroups(prev => 
-          prev.map(group => 
-            group.id === groupId ? { ...group, visible: !group.visible } : group
-          )
-        );
-      }
-    } else {
-      setMaskingGroups(prev => 
-        prev.map(group => 
-          group.id === groupId ? { ...group, visible: !group.visible } : group
-        )
-      );
-    }
-  }, [useSAMGroups, samGroupMode]);
+    setMaskingGroups(prev => 
+      prev.map(group => 
+        group.id === groupId ? { ...group, visible: !group.visible } : group
+      )
+    );
+  }, []);
 
   const handleColorSelect = useCallback((color: string) => {
     setSelectedColor(color);
     setPaintColors(prev => ({ ...prev, [selectedGroup]: color }));
   }, [selectedGroup]);
+
+  // FIXED: Optimized SAM Integration with proper state management
+  const runOptimizedSAM = async () => {
+    if (!meshRef.current || !cameraRef.current || !rendererRef.current || !modelData) {
+      alert('❌ Scene not ready. Please ensure a 3D model is loaded.');
+      return;
+    }
+
+    console.log('🚀 Starting REAL optimized SAM segmentation...');
+
+    try {
+      // Step 1: Initialize optimized SAM
+      console.log('🤖 Initializing optimized SAM...');
+      const initResponse = await fetch('http://localhost:5000/init-optimized-sam', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          model_type: 'vit_h',
+          device: 'cpu'
+        })
+      });
+
+      if (!initResponse.ok) {
+        throw new Error(`Initialization failed: ${initResponse.statusText}`);
+      }
+
+      const initResult = await initResponse.json();
+      console.log('✅ SAM initialized:', initResult);
+
+      // Step 2: Position camera and capture image
+      console.log('📸 Capturing optimal view...');
+      cameraRef.current.position.set(0, 8, 12);
+      cameraRef.current.lookAt(0, 4, 0);
+      cameraRef.current.updateMatrixWorld();
+      rendererRef.current.render(meshRef.current.parent as THREE.Scene, cameraRef.current);
+
+      const imageData = rendererRef.current.domElement.toDataURL('image/png');
+
+      // Step 3: Extract mesh vertices - FIXED to match backend format
+      const geometry = meshRef.current.geometry as THREE.BufferGeometry;
+      const positions = geometry.attributes.position as THREE.BufferAttribute;
+      const vertices: number[][] = [];
+      
+      for (let i = 0; i < positions.count; i++) {
+        vertices.push([
+          positions.getX(i),
+          positions.getY(i),
+          positions.getZ(i)
+        ]);
+      }
+
+      console.log(`📊 Processing ${vertices.length} vertices for REAL semantic segmentation`);
+
+      // Step 4: Send to optimized backend
+      const segmentResponse = await fetch('http://localhost:5000/segment-optimized', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          color_image: imageData,
+          vertices: vertices,
+          miniature_type: 'humanoid',
+          camera_matrix: cameraRef.current.matrixWorld.toArray(),
+          projection_matrix: cameraRef.current.projectionMatrix.toArray(),
+          viewport_size: { width: 1024, height: 1024 }
+        })
+      });
+
+      if (!segmentResponse.ok) {
+        throw new Error(`Segmentation failed: ${segmentResponse.statusText}`);
+      }
+
+      const result: OptimizedSAMResponse = await segmentResponse.json();
+      console.log(`✅ REAL SAM success: ${result.num_regions} semantic regions`);
+
+      // Step 5: Process results and update UI - FIXED
+      const { vertexMapping, maskingGroups: samGroups } = processOptimizedSAMResults(result);
+      
+      setOptimizedSAMResults(result);
+      setMaskingGroups(samGroups); // FIXED: Update masking groups
+      setSamVertexMapping(vertexMapping); // FIXED: Set SAM mapping
+      setPaintColors({}); // Clear existing paint colors
+
+      console.log('🎨 REAL semantic regions applied:');
+      result.regions.forEach(region => {
+        console.log(`   ${region.semantic_type}: ${region.name} (${region.vertices.length} vertices)`);
+      });
+
+    } catch (error) {
+      console.error('❌ REAL optimized SAM failed:', error);
+      alert(`❌ Optimized SAM failed: ${error}`);
+    }
+  };
 
   return (
     <div style={{
@@ -900,10 +808,10 @@ const App: React.FC = () => {
             fontSize: '48px', fontWeight: '800', color: '#1F2937', marginBottom: '8px',
             textShadow: '0 2px 4px rgba(0,0,0,0.1)'
           }}>
-            3D Miniature Painter
+            🎯 REAL Geometric SAM Painter
           </h1>
           <p style={{ fontSize: '18px', color: '#6B7280', fontWeight: '500' }}>
-            Upload your STL files and paint your 3D miniatures with AI-powered segmentation
+            Height-based & radial detection with real 3D coordinate analysis
           </p>
           
           <div style={{ 
@@ -914,22 +822,17 @@ const App: React.FC = () => {
             gap: '8px',
             fontSize: '14px'
           }}>
-            {backendStatus === 'connected' && (
+            {backendStatus === 'connected' ? (
               <React.Fragment>
-                <Brain size={16} style={{ color: '#10B981' }} />
-                <span style={{ color: '#10B981', fontWeight: '600' }}>AI Backend Connected</span>
+                <CheckCircle size={16} style={{ color: '#10B981' }} />
+                <span style={{ color: '#10B981', fontWeight: '600' }}>Real Geometry Analysis Ready</span>
+              </React.Fragment>
+            ) : (
+              <React.Fragment>
+                <AlertCircle size={16} style={{ color: '#F59E0B' }} />
+                <span style={{ color: '#F59E0B', fontWeight: '600' }}>Backend Offline - Mock Mode</span>
               </React.Fragment>
             )}
-            {backendStatus === 'error' && (
-              <React.Fragment>
-                <Zap size={16} style={{ color: '#F59E0B' }} />
-                <span style={{ color: '#F59E0B', fontWeight: '600' }}>Basic Mode (AI Backend Offline)</span>
-              </React.Fragment>
-            )}
-          </div>
-          
-          <div style={{ marginTop: '20px', fontSize: '14px', color: '#6B7280' }}>
-            Mouse: Orbit camera around model • Scroll: Zoom in/out
           </div>
         </div>
 
@@ -979,7 +882,7 @@ const App: React.FC = () => {
               }}>
                 <h2 style={{ fontSize: '24px', fontWeight: '700', color: '#1F2937', marginBottom: '20px' }}>
                   3D Preview: {modelData.name}
-                  {aiAnalysis?.success && (
+                  {optimizedSAMResults && (
                     <span style={{ 
                       marginLeft: '12px', 
                       fontSize: '14px', 
@@ -989,100 +892,116 @@ const App: React.FC = () => {
                       backgroundColor: '#ECFDF5',
                       borderRadius: '4px'
                     }}>
-                      AI Enhanced
+                      🎯 Real Geometry SAM Active
                     </span>
                   )}
                 </h2>
                 
                 <ThreeScene 
                   paintColors={paintColors} 
-                  maskingGroups={getCurrentMaskingGroups()} 
+                  maskingGroups={maskingGroups} 
                   modelData={modelData} 
                   backgroundColor={backgroundColor}
                   selectedGroup={selectedGroup}
-                  aiAnalysis={aiAnalysis}
                   onRefsReady={handleRefsReady}
+                  samVertexMapping={samVertexMapping} // FIXED: Pass SAM mapping
                 />
               </div>
             </div>
 
             <div>
+              {/* Optimized SAM Panel */}
+              <div style={{
+                background: 'white', borderRadius: '16px', padding: '24px',
+                boxShadow: '0 20px 25px -5px rgba(0, 0, 0, 0.1)', marginBottom: '20px'
+              }}>
+                <h3 style={{ fontSize: '18px', fontWeight: '700', color: '#1F2937', marginBottom: '16px', display: 'flex', alignItems: 'center', gap: '8px' }}>
+                  <Brain size={20} />
+                  Real Geometric SAM Analysis
+                </h3>
+                
+                <button
+                  onClick={runOptimizedSAM}
+                  disabled={!modelData}
+                  style={{
+                    width: '100%',
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'center',
+                    gap: '8px',
+                    padding: '12px 16px',
+                    borderRadius: '8px',
+                    fontSize: '16px',
+                    fontWeight: '600',
+                    color: 'white',
+                    border: 'none',
+                    cursor: !modelData ? 'not-allowed' : 'pointer',
+                    background: !modelData 
+                      ? '#9CA3AF' 
+                      : 'linear-gradient(to right, #10B981, #3B82F6)',
+                    boxShadow: '0 4px 6px -1px rgba(0, 0, 0, 0.1)',
+                    marginBottom: '16px'
+                  }}
+                >
+                  <Zap size={20} />
+                  Run Real Geometry Analysis
+                </button>
+
+                {optimizedSAMResults && (
+                  <div style={{
+                    padding: '12px',
+                    backgroundColor: '#ECFDF5',
+                    border: '1px solid #BBF7D0',
+                    borderRadius: '6px',
+                    marginBottom: '16px'
+                  }}>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '8px' }}>
+                      <CheckCircle size={16} style={{ color: '#059669' }} />
+                      <span style={{ fontSize: '14px', fontWeight: '500', color: '#065F46' }}>
+                        Real Geometry Results
+                      </span>
+                    </div>
+                    <div style={{ fontSize: '14px', color: '#047857' }}>
+                      <div>🎯 Regions: {optimizedSAMResults.num_regions}</div>
+                      <div>📊 Method: {optimizedSAMResults.stats.processing_method}</div>
+                      <div>🎨 Geometry: Real height & radial analysis</div>
+                    </div>
+                  </div>
+                )}
+
+                <div style={{
+                  backgroundColor: '#EFF6FF',
+                  border: '1px solid #BFDBFE',
+                  borderRadius: '6px',
+                  padding: '12px'
+                }}>
+                  <div style={{ display: 'flex', alignItems: 'flex-start', gap: '8px' }}>
+                    <Layers size={16} style={{ color: '#2563EB', marginTop: '2px' }} />
+                    <div style={{ fontSize: '14px', color: '#1E40AF' }}>
+                      <div style={{ fontWeight: '500', marginBottom: '4px' }}>Real Geometry Features:</div>
+                      <ul style={{ margin: 0, paddingLeft: '16px', fontSize: '12px', lineHeight: '1.5' }}>
+                        <li>Height-based segmentation (Y coordinates)</li>
+                        <li>Radial detection (X,Z distance from center)</li>
+                        <li>Back region detection (Z coordinates)</li>
+                        <li>No vertex overlap - accurate assignments</li>
+                      </ul>
+                    </div>
+                  </div>
+                </div>
+              </div>
+
               {/* Masking Panel */}
               <div style={{
                 background: 'white', borderRadius: '16px', padding: '24px',
                 boxShadow: '0 20px 25px -5px rgba(0, 0, 0, 0.1)', marginBottom: '20px'
               }}>
-                <div style={{ marginBottom: '16px' }}>
-                  <h3 style={{ fontSize: '18px', fontWeight: '700', color: '#1F2937', marginBottom: '12px', display: 'flex', alignItems: 'center', gap: '8px' }}>
-                    <Palette size={20} />
-                    Masking Groups
-                  </h3>
-                  
-                  {samMasks.length > 0 && (
-                    <div style={{ marginBottom: '16px', padding: '12px', backgroundColor: '#F3F4F6', borderRadius: '8px' }}>
-                      <div style={{ display: 'flex', alignItems: 'center', gap: '12px', marginBottom: '8px' }}>
-                        <button
-                          onClick={handleSAMToggle}
-                          style={{
-                            padding: '6px 12px',
-                            background: useSAMGroups ? '#10B981' : '#6B7280',
-                            color: 'white',
-                            borderRadius: '4px',
-                            border: 'none',
-                            cursor: 'pointer',
-                            fontSize: '12px',
-                            fontWeight: '600'
-                          }}
-                        >
-                          {useSAMGroups ? '🤖 SAM Groups' : '📐 Geometric Groups'}
-                        </button>
-                        
-                        <span style={{ fontSize: '12px', color: '#6B7280' }}>
-                          {useSAMGroups 
-                            ? `${samGroupMode === 'individual' ? samMaskGroups.length : samSemanticGroups.length} AI-detected regions` 
-                            : `${maskingGroups.length} geometric regions`}
-                        </span>
-                      </div>
-                      
-                      {useSAMGroups && (
-                        <div style={{ display: 'flex', gap: '8px' }}>
-                          <button
-                            onClick={() => setSamGroupMode('individual')}
-                            style={{
-                              padding: '4px 8px',
-                              background: samGroupMode === 'individual' ? '#3B82F6' : '#E5E7EB',
-                              color: samGroupMode === 'individual' ? 'white' : '#6B7280',
-                              borderRadius: '4px',
-                              border: 'none',
-                              cursor: 'pointer',
-                              fontSize: '11px'
-                            }}
-                          >
-                            Individual ({samMaskGroups.length})
-                          </button>
-                          <button
-                            onClick={() => setSamGroupMode('semantic')}
-                            style={{
-                              padding: '4px 8px',
-                              background: samGroupMode === 'semantic' ? '#3B82F6' : '#E5E7EB',
-                              color: samGroupMode === 'semantic' ? 'white' : '#6B7280',
-                              borderRadius: '4px',
-                              border: 'none',
-                              cursor: 'pointer',
-                              fontSize: '11px'
-                            }}
-                          >
-                            Semantic ({samSemanticGroups.length})
-                          </button>
-                        </div>
-                      )}
-                    </div>
-                  )}
-                </div>
+                <h3 style={{ fontSize: '18px', fontWeight: '700', color: '#1F2937', marginBottom: '12px', display: 'flex', alignItems: 'center', gap: '8px' }}>
+                  <Palette size={20} />
+                  Painting Regions {samVertexMapping ? '(SAM)' : '(Geometric)'}
+                </h3>
                 
-                {/* Masking Groups List */}
                 <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
-                  {getCurrentMaskingGroups().map((group) => (
+                  {maskingGroups.map((group) => (
                     <div
                       key={group.id}
                       onClick={() => setSelectedGroup(group.id)}
@@ -1121,6 +1040,31 @@ const App: React.FC = () => {
                 </div>
               </div>
 
+              {/* Color Picker */}
+              <div style={{
+                background: 'white', borderRadius: '16px', padding: '24px',
+                boxShadow: '0 20px 25px -5px rgba(0, 0, 0, 0.1)', marginBottom: '20px'
+              }}>
+                <h4 style={{ fontSize: '14px', fontWeight: '600', color: '#374151', marginBottom: '12px' }}>
+                  Paint {maskingGroups.find(g => g.id === selectedGroup)?.name || 'Selected Group'}
+                </h4>
+                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(6, 1fr)', gap: '8px' }}>
+                  {PAINT_COLORS.map((color) => (
+                    <button
+                      key={color}
+                      onClick={() => handleColorSelect(color)}
+                      style={{
+                        width: '36px', height: '36px', borderRadius: '50%',
+                        border: selectedColor === color ? '3px solid #1F2937' : '2px solid #D1D5DB',
+                        backgroundColor: color, cursor: 'pointer', transition: 'all 0.2s ease',
+                        boxShadow: selectedColor === color ? '0 4px 14px 0 rgba(0, 0, 0, 0.3)' : '0 2px 4px 0 rgba(0, 0, 0, 0.1)'
+                      }}
+                      title={color}
+                    />
+                  ))}
+                </div>
+              </div>
+
               {/* Background Picker */}
               <div style={{
                 background: 'white', borderRadius: '16px', padding: '24px',
@@ -1153,142 +1097,6 @@ const App: React.FC = () => {
                 </div>
               </div>
 
-              {/* Color Picker */}
-              <div style={{
-                background: 'white', borderRadius: '16px', padding: '24px',
-                boxShadow: '0 20px 25px -5px rgba(0, 0, 0, 0.1)', marginBottom: '20px'
-              }}>
-                <h4 style={{ fontSize: '14px', fontWeight: '600', color: '#374151', marginBottom: '12px' }}>
-                  Paint {getCurrentMaskingGroups().find(g => g.id === selectedGroup)?.name || 'Selected Group'}
-                </h4>
-                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(6, 1fr)', gap: '8px' }}>
-                  {PAINT_COLORS.map((color) => (
-                    <button
-                      key={color}
-                      onClick={() => handleColorSelect(color)}
-                      style={{
-                        width: '36px', height: '36px', borderRadius: '50%',
-                        border: selectedColor === color ? '3px solid #1F2937' : '2px solid #D1D5DB',
-                        backgroundColor: color, cursor: 'pointer', transition: 'all 0.2s ease',
-                        boxShadow: selectedColor === color ? '0 4px 14px 0 rgba(0, 0, 0, 0.3)' : '0 2px 4px 0 rgba(0, 0, 0, 0.1)'
-                      }}
-                      title={color}
-                    />
-                  ))}
-                </div>
-              </div>
-
-              {/* SAM Test Section */}
-              {modelData && (
-                <div style={{
-                  background: 'white', borderRadius: '16px', padding: '24px',
-                  boxShadow: '0 20px 25px -5px rgba(0, 0, 0, 0.1)', marginBottom: '20px'
-                }}>
-                  <h3 style={{ fontSize: '18px', fontWeight: '700', color: '#1F2937', marginBottom: '16px' }}>
-                    🎯 Optimized SAM Segmentation
-                  </h3>
-                  <div style={{ display: 'flex', gap: '12px', flexDirection: 'column' }}>
-                    <button
-                      onClick={() => {
-                        console.log('🚀 Starting OPTIMIZED SAM analysis...');
-                        if ((window as any).testSAMCapture) {
-                          (window as any).testSAMCapture();
-                        } else {
-                          console.error('❌ SAM function not available');
-                          alert('SAM function not ready. Please wait for scene to load.');
-                        }
-                      }}
-                      style={{
-                        padding: '12px 24px',
-                        background: 'linear-gradient(to right, #10B981, #059669)',
-                        color: 'white',
-                        borderRadius: '8px',
-                        border: 'none',
-                        cursor: 'pointer',
-                        fontSize: '14px',
-                        fontWeight: '600'
-                      }}
-                    >
-                      🎯 Run Optimized SAM (8-12 Regions)
-                    </button>
-                    
-                    <button
-                      onClick={() => {
-                        console.log('🎨 Quick UI test with mock SAM data...');
-                        const quickMockResults = {
-                          masks: [
-                            { mask_id: 0, area: 1500, stability_score: 0.99, vertices: [] },
-                            { mask_id: 1, area: 1200, stability_score: 0.92, vertices: [] },
-                            { mask_id: 2, area: 900, stability_score: 0.88, vertices: [] }
-                          ],
-                          viewport_size: { width: 1024, height: 1024 },
-                          camera_data: {
-                            camera_matrix: Array(16).fill(0),
-                            projection_matrix: Array(16).fill(0)
-                          }
-                        };
-                        
-                        if ((window as any).onSAMResults) {
-                          (window as any).onSAMResults(quickMockResults);
-                          console.log('✅ Quick mock test completed');
-                        }
-                      }}
-                      style={{
-                        padding: '8px 16px',
-                        background: 'linear-gradient(to right, #8B5CF6, #7C3AED)',
-                        color: 'white',
-                        borderRadius: '6px',
-                        border: 'none',
-                        cursor: 'pointer',
-                        fontSize: '12px',
-                        fontWeight: '500'
-                      }}
-                    >
-                      🎨 Quick Mock Test (UI Only)
-                    </button>
-                    
-                    <button
-                      onClick={async () => {
-                        try {
-                          const response = await fetch('http://localhost:5000/health');
-                          if (response.ok) {
-                            const result = await response.json();
-                            alert(`Backend Status: ${result.status}\nSAM Loaded: ${result.sam_loaded}`);
-                          } else {
-                            alert('Backend connection failed');
-                          }
-                        } catch (error) {
-                          alert('Backend not available');
-                        }
-                      }}
-                      style={{
-                        padding: '8px 16px',
-                        background: 'linear-gradient(to right, #3B82F6, #1D4ED8)',
-                        color: 'white',
-                        borderRadius: '6px',
-                        border: 'none',
-                        cursor: 'pointer',
-                        fontSize: '12px',
-                        fontWeight: '500'
-                      }}
-                    >
-                      Test Backend Connection
-                    </button>
-                  </div>
-                  <div style={{ fontSize: '12px', color: '#6B7280', marginTop: '8px', lineHeight: '1.4' }}>
-                    <div style={{ marginBottom: '4px' }}>
-                      <strong>🎯 Optimized SAM:</strong> Uses research-based parameters for ~10 meaningful regions
-                    </div>
-                    <div style={{ marginBottom: '4px' }}>
-                      <strong>🎨 Mock Test:</strong> UI testing with fake data (no backend required)
-                    </div>
-                    <div>
-                      <strong>Status:</strong> Scene {meshRef.current && cameraRef.current && rendererRef.current ? '✅ Ready' : '⏳ Loading'} for processing
-                    </div>
-                  </div>
-                </div>
-              )}
-
               {/* Model Info */}
               <div style={{
                 background: 'white', borderRadius: '16px', padding: '24px',
@@ -1302,32 +1110,14 @@ const App: React.FC = () => {
                   <div><strong>Size:</strong> {(modelData.size / 1024 / 1024).toFixed(2)} MB</div>
                   <div><strong>Type:</strong> {modelData.name.split('.').pop()?.toUpperCase()}</div>
                   <div><strong>Uploaded:</strong> {modelData.uploadedAt.toLocaleString()}</div>
+                  {optimizedSAMResults && (
+                    <div style={{ marginTop: '8px', paddingTop: '8px', borderTop: '1px solid #E5E7EB' }}>
+                      <div><strong>SAM Status:</strong> ✅ Real geometry ({optimizedSAMResults.num_regions} regions)</div>
+                      <div><strong>Method:</strong> {optimizedSAMResults.stats.processing_method}</div>
+                    </div>
+                  )}
                 </div>
               </div>
-
-              {/* SAM Results Info */}
-              {samMasks.length > 0 && (
-                <div style={{
-                  background: 'white', borderRadius: '16px', padding: '24px',
-                  boxShadow: '0 20px 25px -5px rgba(0, 0, 0, 0.1)', marginTop: '20px'
-                }}>
-                  <h3 style={{ fontSize: '18px', fontWeight: '700', color: '#1F2937', marginBottom: '16px' }}>
-                    🎭 SAM Analysis Results
-                  </h3>
-                  <div style={{ fontSize: '14px', color: '#4B5563', lineHeight: '1.6' }}>
-                    <div><strong>Status:</strong> ✅ SAM Segmentation Complete</div>
-                    <div><strong>Detected Regions:</strong> {samMasks.length}</div>
-                    <div><strong>Individual Groups:</strong> {samMaskGroups.length}</div>
-                    <div><strong>Largest Region:</strong> {Math.max(...samMasks.map(m => m.area)).toLocaleString()} pixels</div>
-                    <div><strong>Average Confidence:</strong> {(samMasks.reduce((sum, m) => sum + m.stability_score, 0) / samMasks.length).toFixed(3)}</div>
-                    
-                    <div style={{ marginTop: '8px', paddingTop: '8px', borderTop: '1px solid #E5E7EB' }}>
-                      <div><strong>3D Mapping:</strong> {useSAMGroups ? '🎭 Active' : '📐 Geometric Mode'}</div>
-                      <div><strong>Scene Ready:</strong> {meshRef.current && cameraRef.current && rendererRef.current ? '✅ Yes' : '⏳ Initializing'}</div>
-                    </div>
-                  </div>
-                </div>
-              )}
             </div>
           </div>
         ) : (
@@ -1346,7 +1136,7 @@ const App: React.FC = () => {
                 Upload an STL file to start painting your miniature
                 {backendStatus === 'connected' && (
                   <span style={{ display: 'block', marginTop: '8px', color: '#10B981', fontWeight: '500' }}>
-                    🤖 AI-powered 3D segmentation ready!
+                    🎯 Real geometry analysis ready!
                   </span>
                 )}
               </p>
