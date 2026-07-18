@@ -1,12 +1,5 @@
 import React from 'react';
-
-const BACKGROUND_COLORS: { name: string; color: number }[] = [
-  { name: 'White', color: 0xffffff },
-  { name: 'Light Gray', color: 0x808080 },
-  { name: 'Dark Gray', color: 0x404040 },
-  { name: 'Black', color: 0x000000 },
-  { name: 'Blue', color: 0x87ceeb }
-];
+import { BACKGROUND_COLORS } from '../utils/constants';
 
 interface BackgroundPickerProps {
   selectedBackground: number;

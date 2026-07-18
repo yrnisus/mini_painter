@@ -16,7 +16,7 @@ const ModelInfo: React.FC<ModelInfoProps> = ({ modelData }) => (
     <div style={{ fontSize: '14px', color: '#4B5563', lineHeight: '1.6' }}>
       <div><strong>Name:</strong> {modelData.name}</div>
       <div><strong>Size:</strong> {(modelData.size / 1024 / 1024).toFixed(2)} MB</div>
-      <div><strong>Type:</strong> {modelData.name.split('.').pop()?.toUpperCase()}</div>
+      <div><strong>Triangles:</strong> {modelData.triCount.toLocaleString()}</div>
       <div><strong>Uploaded:</strong> {modelData.uploadedAt.toLocaleString()}</div>
     </div>
   </div>
