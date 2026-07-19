@@ -1,156 +1,433 @@
-import React, { useState, useCallback } from 'react';
-import { Upload } from 'lucide-react';
-import * as THREE from 'three';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { Brush, Camera, Download, MousePointer, RotateCcw, Undo2, Upload } from 'lucide-react';
 
-// Import our modular components
-import FileUpload from './components/FileUpload';
-import ThreeScene from './components/ThreeScene';
 import BackgroundPicker from './components/BackgroundPicker';
 import ColorPicker from './components/ColorPicker';
-import MaskingPanel from './components/MaskingPanel';
+import FileUpload from './components/FileUpload';
+import LayerPanel, { LayerRow } from './components/LayerPanel';
 import ModelInfo from './components/ModelInfo';
+import ThreeScene, { RegionRender, ThreeSceneHandle } from './components/ThreeScene';
 
-// Import types and utilities
-import { ModelData, PaintColors, MaskingGroup } from './types/index';
+import { FinishName, ModelData, PatchStyles, SegmentationData } from './types';
+import { BACKGROUND_COLORS, PAINT_COLORS } from './utils/constants';
+import {
+  buildRegions,
+  defaultStyles,
+  requestSegmentation,
+  rootsAtCut,
+} from './utils/segmentation';
 import { loadSTLFile } from './utils/stlLoader';
-import { PAINT_COLORS, MASKING_GROUPS } from './utils/constants';
+
+const UNPAINTED = '#b9b9b9';
+const MAX_SLIDER_REGIONS = 60;
+const UNDO_LIMIT = 50;
+
+/** distinct muted colors so unpainted regions are visibly separate */
+const autoTintColor = (i: number) => `hsl(${(i * 137.508) % 360}, 42%, 63%)`;
+
+type SegStatus =
+  | { kind: 'idle' }
+  | { kind: 'running' }
+  | { kind: 'done'; seconds: number }
+  | { kind: 'error'; message: string };
 
 const App: React.FC = () => {
   const [modelData, setModelData] = useState<ModelData | null>(null);
-  const [isLoading, setIsLoading] = useState<boolean>(false);
-  const [paintColors, setPaintColors] = useState<PaintColors>({});
-  const [maskingGroups, setMaskingGroups] = useState<MaskingGroup[]>(MASKING_GROUPS);
-  const [selectedGroup, setSelectedGroup] = useState<string>('armor');
-  const [selectedColor, setSelectedColor] = useState<string>('#FF0000');
-  const [backgroundColor, setBackgroundColor] = useState<number>(0xffffff);
+  const [isLoading, setIsLoading] = useState(false);
+  const [seg, setSeg] = useState<SegmentationData | null>(null);
+  const [segStatus, setSegStatus] = useState<SegStatus>({ kind: 'idle' });
+  const [styles, setStyles] = useState<PatchStyles | null>(null);
+  const [regionCount, setRegionCount] = useState(12);
+  const [names, setNames] = useState<Record<number, string>>({});
+  const [selectedRegion, setSelectedRegion] = useState<number | null>(null);
+  const [activeColor, setActiveColor] = useState<string>(PAINT_COLORS[0]);
+  const [activeFinish, setActiveFinish] = useState<FinishName>('matte');
+  const [mode, setMode] = useState<'paint' | 'inspect'>('paint');
+  const [autoTint, setAutoTint] = useState(true);
+  const [backgroundColor, setBackgroundColor] = useState<number>(
+    BACKGROUND_COLORS[0].color
+  );
+  const undoStack = useRef<PatchStyles[]>([]);
+  const sceneHandle = useRef<ThreeSceneHandle>(null);
 
   const handleFileUpload = useCallback(async (file: File) => {
     setIsLoading(true);
+    setSeg(null);
+    setStyles(null);
+    setNames({});
+    setSelectedRegion(null);
+    undoStack.current = [];
     try {
-      let geometry: THREE.BufferGeometry;
-      
-      if (file.name.toLowerCase().endsWith('.stl')) {
-        geometry = await loadSTLFile(file);
-      } else {
-        geometry = new THREE.BoxGeometry(2, 3, 1);
-      }
-
-      setModelData({
-        name: file.name, 
-        size: file.size, 
-        type: file.type,
-        uploadedAt: new Date(), 
-        geometry: geometry
-      });
-      setPaintColors({});
-      
-    } catch (error) {
-      alert(`Error loading ${file.name}. Showing placeholder instead.`);
-      const fallbackGeometry = new THREE.CylinderGeometry(1, 1, 3, 16);
-      setModelData({
-        name: `${file.name} (placeholder)`, 
-        size: file.size, 
-        type: file.type,
-        uploadedAt: new Date(), 
-        geometry: fallbackGeometry
-      });
-      setPaintColors({});
-    } finally {
+      const data = await loadSTLFile(file);
+      setModelData(data);
+    } catch (err) {
+      alert(`Could not read ${file.name}: ${err}`);
       setIsLoading(false);
+      return;
+    }
+    setIsLoading(false);
+
+    setSegStatus({ kind: 'running' });
+    try {
+      const result = await requestSegmentation(file);
+      setSeg(result);
+      setStyles(defaultStyles(result.nPatches));
+      setRegionCount(result.suggestedRegions);
+      setSegStatus({ kind: 'done', seconds: result.elapsedSeconds });
+    } catch (err: any) {
+      setSegStatus({
+        kind: 'error',
+        message:
+          err?.message === 'Failed to fetch'
+            ? 'segmentation backend not reachable — run backend/start_backend.sh'
+            : String(err?.message || err),
+      });
     }
   }, []);
 
-  const handleGroupToggle = useCallback((groupId: string) => {
-    setMaskingGroups(prev => 
-      prev.map(group => 
-        group.id === groupId ? { ...group, visible: !group.visible } : group
-      )
-    );
+  const roots = useMemo(
+    () => (seg ? rootsAtCut(seg, regionCount) : null),
+    [seg, regionCount]
+  );
+
+  const triRegion = useMemo(() => {
+    if (!seg || !roots) return null;
+    const out = new Int32Array(seg.basePatch.length);
+    for (let t = 0; t < seg.basePatch.length; t++) {
+      out[t] = roots[seg.basePatch[t]];
+    }
+    return out;
+  }, [seg, roots]);
+
+  const regions = useMemo(
+    () => (seg && roots && styles ? buildRegions(seg, roots, styles) : []),
+    [seg, roots, styles]
+  );
+
+  const regionRenders: RegionRender[] = useMemo(
+    () =>
+      regions.map((r, i) => ({
+        id: r.id,
+        displayColor:
+          r.color ?? (autoTint ? autoTintColor(i) : UNPAINTED),
+        finish: r.finish,
+        visible: r.visible,
+      })),
+    [regions, autoTint]
+  );
+
+  const layerRows: LayerRow[] = useMemo(() => {
+    const total = modelData?.triCount || 1;
+    return regions.map((r, i) => ({
+      id: r.id,
+      name: names[r.id] || `Region ${i + 1}`,
+      swatch: r.color ?? (autoTint ? autoTintColor(i) : UNPAINTED),
+      painted: r.color != null,
+      finish: r.finish,
+      visible: r.visible,
+      pct: (100 * r.triCount) / total,
+    }));
+  }, [regions, names, autoTint, modelData]);
+
+  const pushUndo = useCallback(() => {
+    if (!styles) return;
+    undoStack.current.push({
+      color: [...styles.color],
+      finish: [...styles.finish],
+      visible: [...styles.visible],
+    });
+    if (undoStack.current.length > UNDO_LIMIT) undoStack.current.shift();
+  }, [styles]);
+
+  const applyToRegion = useCallback(
+    (regionId: number, fn: (s: PatchStyles, patch: number) => void) => {
+      const region = regions.find((r) => r.id === regionId);
+      if (!region || !styles) return;
+      const next: PatchStyles = {
+        color: [...styles.color],
+        finish: [...styles.finish],
+        visible: [...styles.visible],
+      };
+      region.patches.forEach((p) => fn(next, p));
+      setStyles(next);
+    },
+    [regions, styles]
+  );
+
+  const handlePickRegion = useCallback(
+    (regionId: number | null) => {
+      setSelectedRegion(regionId);
+      if (regionId == null || mode !== 'paint') return;
+      pushUndo();
+      applyToRegion(regionId, (s, p) => {
+        s.color[p] = activeColor;
+        s.finish[p] = activeFinish;
+      });
+    },
+    [mode, activeColor, activeFinish, pushUndo, applyToRegion]
+  );
+
+  const handleSelectRow = useCallback((id: number) => setSelectedRegion(id), []);
+
+  const handleToggleVisible = useCallback(
+    (id: number) => {
+      const region = regions.find((r) => r.id === id);
+      if (!region) return;
+      const target = !region.visible;
+      applyToRegion(id, (s, p) => {
+        s.visible[p] = target;
+      });
+    },
+    [regions, applyToRegion]
+  );
+
+  const handleFinishChange = useCallback(
+    (id: number, finish: FinishName) => {
+      pushUndo();
+      applyToRegion(id, (s, p) => {
+        s.finish[p] = finish;
+      });
+    },
+    [pushUndo, applyToRegion]
+  );
+
+  const handleUndo = useCallback(() => {
+    const prev = undoStack.current.pop();
+    if (prev) setStyles(prev);
   }, []);
 
-  const handleColorSelect = useCallback((color: string) => {
-    setSelectedColor(color);
-    setPaintColors(prev => ({ ...prev, [selectedGroup]: color }));
-  }, [selectedGroup]);
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'z') {
+        e.preventDefault();
+        handleUndo();
+      }
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [handleUndo]);
+
+  const handleResetColors = useCallback(() => {
+    if (!seg) return;
+    pushUndo();
+    setStyles(defaultStyles(seg.nPatches));
+  }, [seg, pushUndo]);
+
+  const handleScreenshot = useCallback(() => {
+    const url = sceneHandle.current?.captureScreenshot();
+    if (!url) return;
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `${modelData?.name || 'mini'}-painted.png`;
+    a.click();
+  }, [modelData]);
+
+  const handleExportScheme = useCallback(() => {
+    if (!styles || !seg) return;
+    const blob = new Blob(
+      [JSON.stringify({
+        version: 1,
+        nPatches: seg.nPatches,
+        regionCount,
+        styles,
+        names,
+      })],
+      { type: 'application/json' }
+    );
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = `${modelData?.name || 'mini'}-scheme.json`;
+    a.click();
+    URL.revokeObjectURL(a.href);
+  }, [styles, seg, regionCount, names, modelData]);
+
+  const maxRegions = seg ? Math.min(seg.nPatches, MAX_SLIDER_REGIONS) : 1;
 
   return (
-    <div style={{
-      minHeight: '100vh',
-      background: 'linear-gradient(135deg, #E0E7FF 0%, #F3E8FF 50%, #FCE7F3 100%)',
-      padding: '20px'
-    }}>
-      <div style={{ maxWidth: '1200px', margin: '0 auto' }}>
-        <div style={{ textAlign: 'center', marginBottom: '40px' }}>
-          <h1 style={{ 
-            fontSize: '48px', fontWeight: '800', color: '#1F2937', marginBottom: '8px',
-            textShadow: '0 2px 4px rgba(0,0,0,0.1)'
-          }}>
+    <div
+      style={{
+        minHeight: '100vh',
+        background: 'linear-gradient(135deg, #E0E7FF 0%, #F3E8FF 50%, #FCE7F3 100%)',
+        padding: '20px',
+      }}
+    >
+      <div style={{ maxWidth: '1400px', margin: '0 auto' }}>
+        <div style={{ textAlign: 'center', marginBottom: '24px' }}>
+          <h1
+            style={{
+              fontSize: '40px', fontWeight: 800, color: '#1F2937', marginBottom: '4px',
+              textShadow: '0 2px 4px rgba(0,0,0,0.1)',
+            }}
+          >
             3D Miniature Painter
           </h1>
-          <p style={{ fontSize: '18px', color: '#6B7280', fontWeight: '500' }}>
-            Upload your STL files and paint your 3D miniatures in real-time
+          <p style={{ fontSize: '16px', color: '#6B7280', fontWeight: 500 }}>
+            Upload an STL — it splits into paintable regions automatically
           </p>
-          <div style={{ marginTop: '20px', fontSize: '14px', color: '#6B7280' }}>
-            Mouse: Orbit camera around model • Scroll: Zoom in/out
-          </div>
         </div>
 
-        <div style={{ display: 'flex', justifyContent: 'center', marginBottom: '40px' }}>
+        <div
+          style={{
+            display: 'flex', justifyContent: 'center', alignItems: 'center',
+            gap: '16px', marginBottom: '20px', flexWrap: 'wrap',
+          }}
+        >
           <FileUpload onFileUpload={handleFileUpload} isLoading={isLoading} />
+          {segStatus.kind === 'running' && (
+            <span data-testid="seg-status" style={{ color: '#6B7280', fontSize: '14px' }}>
+              ⏳ segmenting…
+            </span>
+          )}
+          {segStatus.kind === 'done' && (
+            <span data-testid="seg-status" style={{ color: '#059669', fontSize: '14px' }}>
+              ✓ segmented in {segStatus.seconds}s
+            </span>
+          )}
+          {segStatus.kind === 'error' && (
+            <span data-testid="seg-status" style={{ color: '#DC2626', fontSize: '14px' }}>
+              ⚠ {segStatus.message}
+            </span>
+          )}
         </div>
 
         {modelData ? (
-          <div style={{ display: 'grid', gridTemplateColumns: '2fr 1fr', gap: '32px' }}>
+          <div style={{ display: 'grid', gridTemplateColumns: 'minmax(0, 1fr) 360px', gap: '24px' }}>
             <div>
-              <div style={{
-                background: 'white', borderRadius: '16px', padding: '24px',
-                boxShadow: '0 20px 25px -5px rgba(0, 0, 0, 0.1)', marginBottom: '20px'
-              }}>
-                <h2 style={{ fontSize: '24px', fontWeight: '700', color: '#1F2937', marginBottom: '20px' }}>
-                  3D Preview: {modelData.name}
-                </h2>
-                
-                <ThreeScene 
-                  paintColors={paintColors} 
-                  maskingGroups={maskingGroups} 
-                  modelData={modelData} 
-                  backgroundColor={backgroundColor} 
+              <div
+                style={{
+                  background: 'white', borderRadius: '16px', padding: '20px',
+                  boxShadow: '0 20px 25px -5px rgba(0, 0, 0, 0.1)',
+                }}
+              >
+                <div
+                  style={{
+                    display: 'flex', justifyContent: 'space-between',
+                    alignItems: 'center', marginBottom: '12px', flexWrap: 'wrap', gap: '8px',
+                  }}
+                >
+                  <h2 style={{ fontSize: '18px', fontWeight: 700, color: '#1F2937' }}>
+                    {modelData.name}
+                  </h2>
+                  <div style={{ display: 'flex', gap: '8px' }}>
+                    <ToolButton
+                      active={mode === 'paint'}
+                      onClick={() => setMode('paint')}
+                      title="click a part to paint it"
+                    >
+                      <Brush size={15} /> Paint
+                    </ToolButton>
+                    <ToolButton
+                      active={mode === 'inspect'}
+                      onClick={() => setMode('inspect')}
+                      title="click a part to select without painting"
+                    >
+                      <MousePointer size={15} /> Inspect
+                    </ToolButton>
+                    <ToolButton onClick={handleUndo} title="undo (Ctrl+Z)">
+                      <Undo2 size={15} />
+                    </ToolButton>
+                    <ToolButton onClick={handleResetColors} title="clear all paint">
+                      <RotateCcw size={15} />
+                    </ToolButton>
+                    <ToolButton onClick={handleScreenshot} title="save PNG">
+                      <Camera size={15} />
+                    </ToolButton>
+                    <ToolButton onClick={handleExportScheme} title="export paint scheme">
+                      <Download size={15} />
+                    </ToolButton>
+                  </div>
+                </div>
+                <ThreeScene
+                  ref={sceneHandle}
+                  modelData={modelData}
+                  triRegion={triRegion}
+                  regions={regionRenders}
+                  selectedRegion={selectedRegion}
+                  backgroundColor={backgroundColor}
+                  onPickRegion={handlePickRegion}
                 />
+                <div style={{ marginTop: '8px', fontSize: '12px', color: '#9CA3AF' }}>
+                  drag to orbit • scroll to zoom • {mode === 'paint'
+                    ? 'click a part to paint it'
+                    : 'click a part to select it'}
+                  <label style={{ marginLeft: '16px', cursor: 'pointer' }}>
+                    <input
+                      type="checkbox"
+                      checked={autoTint}
+                      onChange={(e) => setAutoTint(e.target.checked)}
+                      style={{ marginRight: '4px' }}
+                    />
+                    tint unpainted regions
+                  </label>
+                </div>
               </div>
             </div>
 
-            <div>
-              <div style={{
-                background: 'white', borderRadius: '16px', padding: '24px',
-                boxShadow: '0 20px 25px -5px rgba(0, 0, 0, 0.1)', marginBottom: '20px'
-              }}>
-                <MaskingPanel
-                  groups={maskingGroups} 
-                  onGroupToggle={handleGroupToggle}
-                  selectedGroup={selectedGroup} 
-                  onGroupSelect={setSelectedGroup}
+            <div style={{ display: 'flex', flexDirection: 'column', gap: '16px' }}>
+              <div
+                style={{
+                  background: 'white', borderRadius: '16px', padding: '20px',
+                  boxShadow: '0 20px 25px -5px rgba(0, 0, 0, 0.1)',
+                }}
+              >
+                <ColorPicker
+                  colors={PAINT_COLORS}
+                  selectedColor={activeColor}
+                  onColorSelect={setActiveColor}
+                  title="Paint color"
                 />
+                <div style={{ display: 'flex', gap: '6px', alignItems: 'center' }}>
+                  <span style={{ fontSize: '13px', fontWeight: 600, color: '#374151' }}>
+                    Finish:
+                  </span>
+                  {(['matte', 'satin', 'gloss', 'metallic'] as FinishName[]).map((f) => (
+                    <button
+                      key={f}
+                      onClick={() => setActiveFinish(f)}
+                      style={{
+                        fontSize: '12px', padding: '4px 10px', borderRadius: '999px',
+                        border: activeFinish === f ? '2px solid #3B82F6' : '1px solid #D1D5DB',
+                        background: activeFinish === f ? '#EFF6FF' : 'white',
+                        cursor: 'pointer', color: '#374151',
+                      }}
+                    >
+                      {f}
+                    </button>
+                  ))}
+                </div>
               </div>
 
-              <div style={{
-                background: 'white', borderRadius: '16px', padding: '24px',
-                boxShadow: '0 20px 25px -5px rgba(0, 0, 0, 0.1)', marginBottom: '20px'
-              }}>
+              {seg && styles && (
+                <div
+                  style={{
+                    background: 'white', borderRadius: '16px', padding: '20px',
+                    boxShadow: '0 20px 25px -5px rgba(0, 0, 0, 0.1)',
+                  }}
+                >
+                  <LayerPanel
+                    rows={layerRows}
+                    selectedRegion={selectedRegion}
+                    onSelect={handleSelectRow}
+                    onToggleVisible={handleToggleVisible}
+                    onFinishChange={handleFinishChange}
+                    onRename={(id, name) => setNames((n) => ({ ...n, [id]: name }))}
+                    regionCount={regionCount}
+                    maxRegions={maxRegions}
+                    onRegionCountChange={setRegionCount}
+                    suggested={seg.suggestedRegions}
+                  />
+                </div>
+              )}
+
+              <div
+                style={{
+                  background: 'white', borderRadius: '16px', padding: '20px',
+                  boxShadow: '0 20px 25px -5px rgba(0, 0, 0, 0.1)',
+                }}
+              >
                 <BackgroundPicker
                   selectedBackground={backgroundColor}
                   onBackgroundSelect={setBackgroundColor}
-                />
-              </div>
-
-              <div style={{
-                background: 'white', borderRadius: '16px', padding: '24px',
-                boxShadow: '0 20px 25px -5px rgba(0, 0, 0, 0.1)', marginBottom: '20px'
-              }}>
-                <ColorPicker
-                  colors={PAINT_COLORS} 
-                  selectedColor={selectedColor}
-                  onColorSelect={handleColorSelect}
-                  title={`Paint ${maskingGroups.find(g => g.id === selectedGroup)?.name || 'Selected Group'}`}
                 />
               </div>
 
@@ -158,19 +435,23 @@ const App: React.FC = () => {
             </div>
           </div>
         ) : (
-          <div style={{ textAlign: 'center', paddingTop: '60px' }}>
-            <div style={{
-              background: 'white', borderRadius: '16px', padding: '48px',
-              boxShadow: '0 20px 25px -5px rgba(0, 0, 0, 0.1)', maxWidth: '500px', margin: '0 auto'
-            }}>
+          <div style={{ textAlign: 'center', paddingTop: '48px' }}>
+            <div
+              style={{
+                background: 'white', borderRadius: '16px', padding: '48px',
+                boxShadow: '0 20px 25px -5px rgba(0, 0, 0, 0.1)',
+                maxWidth: '500px', margin: '0 auto',
+              }}
+            >
               <div style={{ color: '#9CA3AF', marginBottom: '16px' }}>
                 <Upload size={64} style={{ margin: '0 auto' }} />
               </div>
-              <h3 style={{ fontSize: '24px', fontWeight: '700', color: '#374151', marginBottom: '8px' }}>
+              <h3 style={{ fontSize: '24px', fontWeight: 700, color: '#374151', marginBottom: '8px' }}>
                 No Model Uploaded
               </h3>
-              <p style={{ color: '#6B7280', fontSize: '16px', marginBottom: '16px' }}>
-                Upload an STL file to start painting your miniature
+              <p style={{ color: '#6B7280', fontSize: '16px' }}>
+                Upload an STL file — it will be split into paintable regions
+                (armor, weapons, cloth…) automatically
               </p>
             </div>
           </div>
@@ -179,5 +460,26 @@ const App: React.FC = () => {
     </div>
   );
 };
+
+const ToolButton: React.FC<{
+  active?: boolean;
+  onClick: () => void;
+  title: string;
+  children: React.ReactNode;
+}> = ({ active, onClick, title, children }) => (
+  <button
+    onClick={onClick}
+    title={title}
+    style={{
+      display: 'flex', alignItems: 'center', gap: '4px',
+      fontSize: '13px', padding: '6px 10px', borderRadius: '8px',
+      border: active ? '2px solid #3B82F6' : '1px solid #D1D5DB',
+      background: active ? '#EFF6FF' : 'white',
+      cursor: 'pointer', color: '#374151',
+    }}
+  >
+    {children}
+  </button>
+);
 
 export default App;

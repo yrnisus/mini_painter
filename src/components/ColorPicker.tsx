@@ -32,6 +32,18 @@ const ColorPicker: React.FC<ColorPickerProps> = ({
         />
       ))}
     </div>
+    <label style={{
+      display: 'flex', alignItems: 'center', gap: '8px', marginTop: '10px',
+      fontSize: '12px', color: '#6B7280', cursor: 'pointer'
+    }}>
+      <input
+        type="color"
+        value={selectedColor}
+        onChange={(e) => onColorSelect(e.target.value)}
+        style={{ width: '36px', height: '28px', border: 'none', padding: 0, cursor: 'pointer' }}
+      />
+      custom color {selectedColor}
+    </label>
   </div>
 );
 

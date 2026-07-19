@@ -1,46 +1,109 @@
-# Getting Started with Create React App
+# 3D Miniature Painter
 
-This project was bootstrapped with [Create React App](https://github.com/facebook/create-react-app).
+Upload a miniature STL and it is **automatically split into paintable
+regions** — armor vs. cloak vs. sword vs. base — which you can then recolor
+independently, like layers in an image editor, to preview paint schemes
+before committing brush to plastic.
 
-## Available Scripts
+![workflow](docs/screenshots/2-painted.png)
 
-In the project directory, you can run:
+## How it works
 
-### `npm start`
+The old idea of running SAM over rendered views and projecting masks back
+onto the mesh was abandoned: STL miniatures have no texture, so part
+boundaries are *geometric* features. The backend segments the mesh directly:
 
-Runs the app in the development mode.\
-Open [http://localhost:3000](http://localhost:3000) to view it in the browser.
+1. **Over-segmentation** — the mesh is split into ~500 small surface patches
+   by crease-aware region growing (multi-source Dijkstra over the face
+   adjacency graph, where stepping across a concave crease is expensive —
+   the Katz–Tal "angular distance" idea), plus Lloyd relaxation so patch
+   borders are compact and snap to sharp edges.
+2. **Shape thickness** — a Shape Diameter Function per face (cone of rays
+   cast inward, median distance), so a thin sword blade reads as a
+   different structure than the thick torso it is welded to.
+3. **Hierarchical merging** — adjacent patches merge greedily, cheapest
+   boundary first (boundary concavity + thickness difference), and the full
+   merge sequence is sent to the client. The **granularity slider replays
+   that sequence with a union-find**, so moving between "5 big regions" and
+   "60 fine regions" is instant, with no server round trip.
+4. Paint (color + matte/satin/gloss/metallic finish) is stored per *base
+   patch*, so your scheme survives granularity changes.
 
-The page will reload if you make edits.\
-You will also see any lint errors in the console.
+Segmenting a 55k-triangle model takes ~1.5 s on CPU. Meshes over 90k faces
+are decimated internally for segmentation and labels are mapped back to full
+resolution. Multi-part STLs (separate shells) are handled naturally —
+connected components can never merge with each other before real parts do.
 
-### `npm test`
+## Running it
 
-Launches the test runner in the interactive watch mode.\
-See the section about [running tests](https://facebook.github.io/create-react-app/docs/running-tests) for more information.
+Backend (Python 3.10+):
 
-### `npm run build`
+```bash
+cd backend
+python -m venv venv
+venv/bin/pip install -r requirements.txt
+venv/bin/python app.py            # serves on http://127.0.0.1:5000
+```
 
-Builds the app for production to the `build` folder.\
-It correctly bundles React in production mode and optimizes the build for the best performance.
+Frontend:
 
-The build is minified and the filenames include the hashes.\
-Your app is ready to be deployed!
+```bash
+npm install
+npm start                          # opens http://localhost:3000
+```
 
-See the section about [deployment](https://facebook.github.io/create-react-app/docs/deployment) for more information.
+Or both at once: `./start.sh`
 
-### `npm run eject`
+## Using it
 
-**Note: this is a one-way operation. Once you `eject`, you can’t go back!**
+- **Upload** a binary or ASCII STL. The model appears immediately;
+  segmentation lands a second or two later (unpainted regions get muted
+  distinct tints — toggle "tint unpainted regions" off for plain gray).
+- **Paint mode** (default): pick a color and a finish, then click a part.
+- **Inspect mode**: click selects the region without painting.
+- **Detail slider**: coarser = regions merge (in geometry-aware order),
+  finer = they split. Paint sticks to the fine patches underneath.
+- Layer list: double-click to rename, eye icon to hide/show a region,
+  per-region finish dropdown.
+- **Ctrl+Z** undoes paints. Camera button saves a PNG; download button
+  exports the paint scheme as JSON.
 
-If you aren’t satisfied with the build tool and configuration choices, you can `eject` at any time. This command will remove the single build dependency from your project.
+## Verifying the segmentation
 
-Instead, it will copy all the configuration files and the transitive dependencies (webpack, Babel, ESLint, etc) right into your project so you have full control over them. All of the commands except `eject` will still work, but they will point to the copied scripts so you can tweak them. At this point you’re on your own.
+`backend/make_test_mini.py` builds two synthetic knights (one fused into a
+single watertight surface — the hard case — and one of loose parts) with
+construction-time ground truth, and `backend/tests/test_segmentation.py`
+scores the segmentation against them (region purity / recall /
+fragmentation per semantic part) and checks that STL triangle order is
+preserved through the load path, which the client depends on:
 
-You don’t have to ever use `eject`. The curated feature set is suitable for small and middle deployments, and you shouldn’t feel obligated to use this feature. However we understand that this tool wouldn’t be useful if you couldn’t customize it when you are ready for it.
+```bash
+cd backend
+venv/bin/python make_test_mini.py      # regenerate fixtures (needs manifold3d)
+venv/bin/python tests/test_segmentation.py
+```
 
-## Learn More
+## Repo layout
 
-You can learn more in the [Create React App documentation](https://facebook.github.io/create-react-app/docs/getting-started).
+```
+backend/
+  app.py            Flask API (POST /api/segment)
+  segmenter.py      the segmentation pipeline
+  make_test_mini.py test fixture generator
+  tests/            verification harness + fixtures
+src/
+  components/       ThreeScene (rendering/picking), LayerPanel, pickers
+  utils/            STL parsing, segmentation client, union-find replay
+```
 
-To learn React, check out the [React documentation](https://reactjs.org/).
+## Known limitations
+
+- STL only for now (OBJ/3MF/GLB would need matching order-preserving
+  parsers on both sides).
+- Region boundaries on large smooth featureless areas are arbitrary — there
+  is no crease to snap to. Painting adjacent regions the same color hides
+  this entirely.
+- No per-face brush yet: the finest paintable unit is a base patch
+  (~0.2 % of the surface).
+- 2D image mode (photo → layers) is not implemented; the 3D path was the
+  goal here.

@@ -1,23 +1,29 @@
-import { MaskingGroup } from '../types';
-
+// palette loosely modelled on common hobby paint ranges
 export const PAINT_COLORS: string[] = [
-  '#FF0000', '#00FF00', '#0000FF', '#FFFF00', '#FF00FF', '#00FFFF',
-  '#800000', '#008000', '#000080', '#808000', '#800080', '#008080',
-  '#FFA500', '#FFC0CB', '#A52A2A', '#808080', '#000000', '#FFFFFF'
+  '#8a0f0f', // blood red
+  '#c23616', // rust orange
+  '#d4a017', // gold
+  '#b08d57', // bronze
+  '#1e5631', // dark green
+  '#4a7c59', // camo green
+  '#1b3a6b', // ultramarine
+  '#2e6e8e', // teal blue
+  '#4b3869', // royal purple
+  '#7a5c3e', // leather brown
+  '#3e2f23', // dark leather
+  '#e8dcc0', // bone
+  '#f0c8a0', // flesh
+  '#c0c4c8', // silver / plate
+  '#5b6167', // gunmetal
+  '#23272b', // black
+  '#f5f5f0', // white
+  '#8f9779', // stone grey-green
 ];
 
 export const BACKGROUND_COLORS: { name: string; color: number }[] = [
+  { name: 'Studio Grey', color: 0xe8eaed },
   { name: 'White', color: 0xffffff },
-  { name: 'Light Gray', color: 0x808080 },
-  { name: 'Dark Gray', color: 0x404040 },
-  { name: 'Black', color: 0x000000 },
-  { name: 'Blue', color: 0x87ceeb }
-];
-
-export const MASKING_GROUPS: MaskingGroup[] = [
-  { id: 'armor', name: 'Armor', color: '#8B4513', visible: true },
-  { id: 'weapon', name: 'Weapon', color: '#C0C0C0', visible: true },
-  { id: 'cloak', name: 'Cloak', color: '#800080', visible: true },
-  { id: 'skin', name: 'Skin', color: '#FDBCB4', visible: true },
-  { id: 'base', name: 'Base', color: '#654321', visible: true }
+  { name: 'Warm', color: 0xf0e6d8 },
+  { name: 'Slate', color: 0x3a4048 },
+  { name: 'Night', color: 0x14161a },
 ];

@@ -1,0 +1,10 @@
+flask
+flask-cors
+numpy
+scipy
+trimesh
+embreex
+fast-simplification
+rtree
+# only needed to regenerate test fixtures (make_test_mini.py):
+manifold3d
