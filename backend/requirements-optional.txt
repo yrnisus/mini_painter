@@ -1,0 +1,6 @@
+# Optional extras -- the backend runs without them.
+# embreex: fast ray casting for the shape-thickness feature; without it the
+#          segmenter still works from crease information alone.
+# manifold3d: only needed to regenerate test fixtures (make_test_mini.py).
+embreex
+manifold3d

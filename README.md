@@ -36,14 +36,16 @@ connected components can never merge with each other before real parts do.
 
 ## Running it
 
-Backend (Python 3.10+):
+Backend (needs Python 3.10+ installed):
 
 ```bash
-cd backend
-python -m venv venv
-venv/bin/pip install -r requirements.txt
-venv/bin/python app.py            # serves on http://127.0.0.1:5000
+backend/start_backend.sh           # Windows: backend\start_backend.bat
 ```
+
+The script creates a venv and installs dependencies on first run, then
+serves on http://127.0.0.1:5000. The extras in
+`requirements-optional.txt` (fast ray casting for the thickness feature)
+are installed best-effort — the backend works without them.
 
 Frontend:
 
@@ -52,7 +54,7 @@ npm install
 npm start                          # opens http://localhost:3000
 ```
 
-Or both at once: `./start.sh`
+Or both at once (Mac/Linux): `./start.sh`
 
 ## Using it
 
