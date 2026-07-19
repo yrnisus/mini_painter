@@ -79,7 +79,7 @@ const App: React.FC = () => {
         kind: 'error',
         message:
           err?.message === 'Failed to fetch'
-            ? 'segmentation backend not reachable — run backend/start_backend.sh'
+            ? 'segmentation backend not reachable — run backend/start_backend.sh (Windows: start_backend.bat)'
             : String(err?.message || err),
       });
     }

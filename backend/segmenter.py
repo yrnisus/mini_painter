@@ -153,8 +153,13 @@ def _face_thickness(mesh: trimesh.Trimesh) -> np.ndarray:
     from each face centroid and take the median distance to the opposite
     surface.  The cone + median matters: a single ray along the normal
     reports a thin disc's side wall as the whole diameter, which then blocks
-    perfectly good merges.  Requires an embree-backed intersector."""
+    perfectly good merges.  Requires an embree-backed intersector -- with
+    the pure-python fallback this would take minutes, so skip instead
+    (segmentation still works from crease information alone)."""
     n = len(mesh.faces)
+    if not getattr(trimesh.ray, "has_embree", False):
+        logger.warning("embree not available; skipping thickness feature")
+        return np.ones(n)
     normals = mesh.face_normals
     # orthonormal tangent frame per face
     helper = np.where(
